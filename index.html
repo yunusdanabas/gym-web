@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://api.github.com; img-src 'self' blob: data:; font-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'self'">
+  <meta name="theme-color" content="#f4f1e8">
+  <title>GYM Ledger</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="locked" class="gate">
+    <section class="gate-card">
+      <p class="kicker">Private · GitHub-backed</p>
+      <h1>GYM Ledger</h1>
+      <p id="gate-copy" class="lede">Unlock this device to see or record anything.</p>
+      <form id="unlock-form" class="stack" hidden>
+        <label>Passphrase<input name="passphrase" type="password" minlength="12" autocomplete="current-password" required></label>
+        <button type="submit">Unlock</button>
+      </form>
+      <form id="setup-form" class="stack" hidden>
+        <label>Fine-grained GitHub token<input name="token" type="password" autocomplete="off" required></label>
+        <label>New passphrase<input name="passphrase" type="password" minlength="12" autocomplete="new-password" required></label>
+        <label>Repeat passphrase<input name="repeat" type="password" minlength="12" autocomplete="new-password" required></label>
+        <p class="hint">The token is encrypted on this device. It is never stored in the site or sent anywhere except GitHub.</p>
+        <button type="submit">Secure this device</button>
+      </form>
+      <p id="gate-status" class="status" role="status"></p>
+    </section>
+  </main>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <div><p class="kicker">Private training record</p><h1>GYM Ledger</h1></div>
+      <div class="header-actions"><span id="network-pill" class="pill network">online</span><span id="mode-pill" class="pill">staging</span><button id="lock-button" class="quiet" type="button">Lock</button></div>
+    </header>
+
+    <main class="shell">
+      <section id="today" class="view active" aria-labelledby="today-title">
+        <div class="view-head"><div><p class="kicker" id="today-date">Today</p><h2 id="today-title">Your brief</h2></div><button id="refresh-button" class="quiet" type="button">Refresh</button></div>
+        <div class="quick-actions"><button class="primary" data-view="entry" type="button">Log today</button><button class="quiet" data-view="upload" type="button">Upload evidence</button></div>
+        <div id="today-content" class="dashboard-grid"><article class="card"><p class="muted">Loading your private brief…</p></article></div>
+      </section>
+
+      <section id="entry" class="view" aria-labelledby="entry-title">
+        <div class="view-head"><div><p class="kicker">Read → review → confirm</p><h2 id="entry-title">New entry</h2></div></div>
+        <div class="segmented" role="tablist" aria-label="Entry type">
+          <button class="segment active" data-entry-tab="daily" role="tab" aria-selected="true" type="button">Daily</button>
+          <button class="segment" data-entry-tab="weekly" role="tab" aria-selected="false" type="button">Weekly</button>
+          <button class="segment" data-entry-tab="text" role="tab" aria-selected="false" type="button">Paste text</button>
+        </div>
+
+        <form id="daily-form" class="form-card stack">
+          <label>Date<input name="date" type="date" required></label>
+          <fieldset><legend>Body & recovery</legend><div class="field-grid">
+            <label>Weight <small>kg</small><input name="weight_kg" type="number" min="30" max="250" step="0.1" inputmode="decimal"></label>
+            <label>Sleep <small>hours</small><input name="sleep_hours" type="number" min="0" max="14" step="0.1" inputmode="decimal"></label>
+            <label>Resting HR <small>bpm</small><input name="resting_hr" type="number" min="30" max="120" step="1" inputmode="numeric"></label>
+            <label>Steps<input name="steps" type="number" min="0" max="60000" step="1" inputmode="numeric"></label>
+          </div></fieldset>
+          <fieldset><legend>Nutrition</legend><div class="field-grid">
+            <label>Calories <small>kcal</small><input name="kcal" type="number" min="500" max="6000" step="1" inputmode="numeric"></label>
+            <label>Protein <small>g</small><input name="protein_g" type="number" min="0" max="400" step="1" inputmode="numeric"></label>
+            <label>Carbs <small>g</small><input name="carbs_g" type="number" min="0" max="800" step="1" inputmode="numeric"></label>
+            <label>Fat <small>g</small><input name="fat_g" type="number" min="0" max="300" step="1" inputmode="numeric"></label>
+            <label>Fiber <small>g</small><input name="fiber_g" type="number" min="0" max="150" step="1" inputmode="numeric"></label>
+            <label>Water <small>ml</small><input name="water_ml" type="number" min="0" max="8000" step="1" inputmode="numeric"></label>
+            <label>Unplanned eating<select name="unplanned_eating"><option value="">Unread</option><option value="none">None</option><option value="minor">Minor</option><option value="significant">Significant</option></select></label>
+          </div></fieldset>
+          <fieldset><legend>Session</legend><div class="field-grid">
+            <label>Status<select name="session_status"><option value="">Unread</option><option value="rest">Rest</option><option value="done">Done</option><option value="partial">Partial</option><option value="skipped">Skipped</option></select></label>
+            <label>Duration <small>minutes</small><input name="session_minutes" type="number" min="0" step="1" inputmode="numeric"></label>
+            <label>Pain<select name="pain"><option value="">Unread</option><option value="false">No</option><option value="true">Yes</option></select></label>
+          </div><div id="exercise-fields" class="exercise-list"></div></fieldset>
+          <fieldset><legend>Cardio</legend><div class="field-grid">
+            <label>Minutes<input name="cardio_min" type="number" min="0" step="1" inputmode="numeric"></label>
+            <label>Type<input name="cardio_type" value="treadmill"></label>
+            <label>Incline <small>%</small><input name="incline_pct" type="number" min="0" step="0.1" inputmode="decimal"></label>
+            <label>Speed <small>mph</small><input name="cardio_speed" type="number" min="0" step="0.1" inputmode="decimal"></label>
+          </div></fieldset>
+          <label>Notes<textarea name="notes" rows="3"></textarea></label>
+          <button type="submit">Send for readback</button><p class="status" role="status"></p>
+        </form>
+
+        <form id="weekly-form" class="form-card stack" hidden>
+          <label>ISO week<input name="week" pattern="\d{4}-W\d{2}" placeholder="2026-W36" required></label>
+          <div class="field-grid">
+            <label>Waist <small>cm</small><input name="waist_cm" type="number" min="40" max="250" step="0.1" required></label>
+            <label>Sleep quality <small>0–10</small><input name="sleep_quality" type="number" min="0" max="10" required></label>
+            <label>Energy <small>0–10</small><input name="energy" type="number" min="0" max="10" required></label>
+            <label>Stress <small>0–10</small><input name="stress" type="number" min="0" max="10" required></label>
+            <label>Hunger <small>0–10</small><input name="hunger" type="number" min="0" max="10" required></label>
+            <label>Worst soreness <small>0–10</small><input name="soreness_worst" type="number" min="0" max="10" required></label>
+            <label>Cardio difficulty <small>0–10</small><input name="cardio_difficulty" type="number" min="0" max="10" required></label>
+            <label>Motivation <small>0–10</small><input name="motivation" type="number" min="0" max="10" required></label>
+            <label>Restaurant meals<input name="restaurant_meals" type="number" min="0" required></label>
+            <label>Alcohol units<input name="alcohol_units" type="number" min="0" step="0.1" required></label>
+          </div><label>Notes<textarea name="notes" rows="3"></textarea></label>
+          <button type="submit">Send weekly review</button><p class="status" role="status"></p>
+        </form>
+
+        <form id="text-form" class="form-card stack" hidden>
+          <label>Date<input name="date" type="date" required></label>
+          <label>Pasted app text or shorthand<textarea name="text" rows="10" placeholder="w 91.0 / 2180 172 208 61 / steps 7412" required></textarea></label>
+          <button type="submit">Parse for readback</button><p class="status" role="status"></p>
+        </form>
+      </section>
+
+      <section id="upload" class="view" aria-labelledby="upload-title">
+        <div class="view-head"><div><p class="kicker">Evidence stays private</p><h2 id="upload-title">Upload</h2></div></div>
+        <form id="upload-form" class="form-card stack">
+          <label id="upload-date-field">Date<input name="date" type="date" required></label>
+          <label id="upload-week-field" hidden>ISO week<input name="week" pattern="\d{4}-W\d{2}" placeholder="2026-W36"></label>
+          <label>Source<select name="source" required><option value="fitnotes">FitNotes</option><option value="eatbetter">EatBetter</option><option value="mi-fitness">Mi Fitness / weekly band export</option></select></label>
+          <label>Screenshot or original export<input name="files" type="file" accept="image/png,image/jpeg,image/webp,.zip,.csv" multiple required></label>
+          <p class="hint">Files are moved into a private 30-day GitHub artifact. Permanent history keeps only the readback and file hashes.</p>
+          <button type="submit">Upload privately</button><p class="status" role="status"></p>
+        </form>
+      </section>
+
+      <section id="review" class="view" aria-labelledby="review-title">
+        <div class="view-head"><div><p class="kicker"><span id="pending-count">0</span> awaiting you</p><h2 id="review-title">Review</h2></div><button id="review-refresh" class="quiet" type="button">Refresh</button></div>
+        <div id="review-list" class="stack"><article class="card"><p class="muted">No readbacks loaded.</p></article></div>
+      </section>
+
+      <section id="history" class="view" aria-labelledby="history-title">
+        <div class="view-head"><div><p class="kicker">Append-only record</p><h2 id="history-title">History</h2></div></div>
+        <div id="history-list" class="stack"></div>
+      </section>
+
+      <section id="settings" class="view" aria-labelledby="settings-title">
+        <div class="view-head"><div><p class="kicker">This device</p><h2 id="settings-title">Settings</h2></div></div>
+        <article class="form-card stack">
+          <p><span class="muted">GitHub account</span><br><strong id="github-user">—</strong></p>
+          <p><span class="muted">Token expiry</span><br><strong id="token-expiry">Not reported by GitHub</strong></p>
+          <button id="connection-test" type="button">Test private connection</button>
+          <button id="theme-toggle" class="quiet" type="button">Switch theme</button>
+          <button id="clear-device" class="danger" type="button">Clear this device</button>
+          <p id="settings-status" class="status" role="status"></p>
+        </article>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Main navigation">
+      <button class="nav-item active" data-view="today" aria-current="page" type="button">Today</button>
+      <button class="nav-item" data-view="entry" type="button">Log</button>
+      <button class="nav-item" data-view="upload" type="button">Upload</button>
+      <button class="nav-item" data-view="review" type="button">Review</button>
+      <button class="nav-item" data-view="history" type="button">History</button>
+      <button class="nav-item" data-view="settings" type="button">Settings</button>
+    </nav>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
