@@ -6,9 +6,18 @@
   <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://api.github.com; img-src 'self' blob: data:; font-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'self'">
-  <meta name="theme-color" content="#f4f1e8">
+  <meta name="theme-color" content="#f4f1e8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#101612" media="(prefers-color-scheme: dark)">
   <title>GYM Ledger</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="GYM">
   <link rel="stylesheet" href="styles.css">
+  <!-- Runs before the app: styles.css keeps the document hidden until this clears the frame check. -->
+  <script type="module" src="guard.js"></script>
 </head>
 <body>
   <main id="locked" class="gate">
@@ -34,57 +43,88 @@
   <div id="app" hidden>
     <header class="topbar">
       <div><p class="kicker">Private training record</p><h1>GYM Ledger</h1></div>
-      <div class="header-actions"><span id="network-pill" class="pill network">online</span><span id="mode-pill" class="pill">staging</span><button id="lock-button" class="quiet" type="button">Lock</button></div>
+      <div class="header-actions"><span id="network-pill" class="pill network">online</span><button id="lock-button" class="quiet" type="button">Lock</button></div>
     </header>
+
+    <!-- Visible on every view, Today and Review included: an entry typed without signal
+         is on this device and nowhere else until it sends. -->
+    <p id="outbox-banner" class="banner outbox" role="status" hidden><span id="outbox-text"></span><button id="outbox-send" class="quiet" type="button" hidden>Send now</button></p>
 
     <main class="shell">
       <section id="today" class="view active" aria-labelledby="today-title">
         <div class="view-head"><div><p class="kicker" id="today-date">Today</p><h2 id="today-title">Your brief</h2></div><button id="refresh-button" class="quiet" type="button">Refresh</button></div>
-        <div class="quick-actions"><button class="primary" data-view="entry" type="button">Log today</button><button class="quiet" data-view="upload" type="button">Upload evidence</button></div>
+        <div class="quick-actions"><button class="primary" data-view="entry" type="button">Log today</button></div>
         <div id="today-content" class="dashboard-grid"><article class="card"><p class="muted">Loading your private brief…</p></article></div>
       </section>
 
       <section id="entry" class="view" aria-labelledby="entry-title">
         <div class="view-head"><div><p class="kicker">Read → review → confirm</p><h2 id="entry-title">New entry</h2></div></div>
         <div class="segmented" role="tablist" aria-label="Entry type">
-          <button class="segment active" data-entry-tab="daily" role="tab" aria-selected="true" type="button">Daily</button>
-          <button class="segment" data-entry-tab="weekly" role="tab" aria-selected="false" type="button">Weekly</button>
-          <button class="segment" data-entry-tab="text" role="tab" aria-selected="false" type="button">Paste text</button>
+          <button class="segment active" id="tab-daily" data-entry-tab="daily" role="tab" aria-selected="true" aria-controls="daily-form" type="button">Daily</button>
+          <button class="segment" id="tab-weekly" data-entry-tab="weekly" role="tab" aria-selected="false" aria-controls="weekly-form" tabindex="-1" type="button">Weekly</button>
+          <button class="segment" id="tab-text" data-entry-tab="text" role="tab" aria-selected="false" aria-controls="text-form" tabindex="-1" type="button">Paste text</button>
         </div>
 
-        <form id="daily-form" class="form-card stack">
+        <form id="daily-form" class="form-card stack" role="tabpanel" aria-labelledby="tab-daily" tabindex="0">
           <label>Date<input name="date" type="date" required></label>
-          <fieldset><legend>Body & recovery</legend><div class="field-grid">
+          <!-- The three numbers logged most days stay in front of everything else. Every
+               other group is behind a disclosure whose summary says how much it holds, so
+               a collapsed section can never hide something already entered. -->
+          <div class="field-grid lead-fields">
             <label>Weight <small>kg</small><input name="weight_kg" type="number" min="30" max="250" step="0.1" inputmode="decimal"></label>
-            <label>Sleep <small>hours</small><input name="sleep_hours" type="number" min="0" max="14" step="0.1" inputmode="decimal"></label>
-            <label>Resting HR <small>bpm</small><input name="resting_hr" type="number" min="30" max="120" step="1" inputmode="numeric"></label>
             <label>Steps<input name="steps" type="number" min="0" max="60000" step="1" inputmode="numeric"></label>
-          </div></fieldset>
-          <fieldset><legend>Nutrition</legend><div class="field-grid">
             <label>Calories <small>kcal</small><input name="kcal" type="number" min="500" max="6000" step="1" inputmode="numeric"></label>
-            <label>Protein <small>g</small><input name="protein_g" type="number" min="0" max="400" step="1" inputmode="numeric"></label>
-            <label>Carbs <small>g</small><input name="carbs_g" type="number" min="0" max="800" step="1" inputmode="numeric"></label>
-            <label>Fat <small>g</small><input name="fat_g" type="number" min="0" max="300" step="1" inputmode="numeric"></label>
-            <label>Fiber <small>g</small><input name="fiber_g" type="number" min="0" max="150" step="1" inputmode="numeric"></label>
-            <label>Water <small>ml</small><input name="water_ml" type="number" min="0" max="8000" step="1" inputmode="numeric"></label>
-            <label>Unplanned eating<select name="unplanned_eating"><option value="">Unread</option><option value="none">None</option><option value="minor">Minor</option><option value="significant">Significant</option></select></label>
-          </div></fieldset>
-          <fieldset><legend>Session</legend><div class="field-grid">
-            <label>Status<select name="session_status"><option value="">Unread</option><option value="rest">Rest</option><option value="done">Done</option><option value="partial">Partial</option><option value="skipped">Skipped</option></select></label>
-            <label>Duration <small>minutes</small><input name="session_minutes" type="number" min="0" step="1" inputmode="numeric"></label>
-            <label>Pain<select name="pain"><option value="">Unread</option><option value="false">No</option><option value="true">Yes</option></select></label>
-          </div><div id="exercise-fields" class="exercise-list"></div></fieldset>
-          <fieldset><legend>Cardio</legend><div class="field-grid">
-            <label>Minutes<input name="cardio_min" type="number" min="0" step="1" inputmode="numeric"></label>
-            <label>Type<input name="cardio_type" value="treadmill"></label>
-            <label>Incline <small>%</small><input name="incline_pct" type="number" min="0" step="0.1" inputmode="decimal"></label>
-            <label>Speed <small>mph</small><input name="cardio_speed" type="number" min="0" step="0.1" inputmode="decimal"></label>
-          </div></fieldset>
-          <label>Notes<textarea name="notes" rows="3"></textarea></label>
+          </div>
+
+          <details class="disclosure" id="daily-nutrition">
+            <summary><span class="disclosure-title">Nutrition detail</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
+            <div class="field-grid">
+              <label>Protein <small>g</small><input name="protein_g" type="number" min="0" max="400" step="1" inputmode="numeric"></label>
+              <label>Carbs <small>g</small><input name="carbs_g" type="number" min="0" max="800" step="1" inputmode="numeric"></label>
+              <label>Fat <small>g</small><input name="fat_g" type="number" min="0" max="300" step="1" inputmode="numeric"></label>
+              <label>Fiber <small>g</small><input name="fiber_g" type="number" min="0" max="150" step="1" inputmode="numeric"></label>
+              <label>Water <small>ml</small><input name="water_ml" type="number" min="0" max="8000" step="1" inputmode="numeric"></label>
+              <label>Unplanned eating<select name="unplanned_eating"><option value="">Unread</option><option value="none">None</option><option value="minor">Minor</option><option value="significant">Significant</option></select></label>
+            </div>
+          </details>
+
+          <details class="disclosure" id="daily-recovery">
+            <summary><span class="disclosure-title">Sleep and heart rate</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
+            <div class="field-grid">
+              <label>Sleep <small>hours</small><input name="sleep_hours" type="number" min="0" max="14" step="0.1" inputmode="decimal"></label>
+              <label>Resting HR <small>bpm</small><input name="resting_hr" type="number" min="30" max="120" step="1" inputmode="numeric"></label>
+            </div>
+          </details>
+
+          <details class="disclosure" id="daily-session">
+            <summary><span class="disclosure-title">Session</span><span class="disclosure-note" id="session-plan"></span><span class="disclosure-count" hidden></span></summary>
+            <div class="field-grid">
+              <label>Status<select name="session_status"><option value="">Unread</option><option value="rest">Rest</option><option value="done">Done</option><option value="partial">Partial</option><option value="skipped">Skipped</option></select></label>
+              <label>Duration <small>minutes</small><input name="session_minutes" type="number" min="0" step="1" inputmode="numeric"></label>
+              <label>Pain<select name="pain"><option value="">Unread</option><option value="false">No</option><option value="true">Yes</option></select></label>
+            </div>
+            <div id="exercise-fields" class="exercise-list"></div>
+          </details>
+
+          <details class="disclosure" id="daily-cardio">
+            <summary><span class="disclosure-title">Cardio</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
+            <div class="field-grid">
+              <label>Minutes<input name="cardio_min" type="number" min="0" step="1" inputmode="numeric"></label>
+              <label>Type<input name="cardio_type" value="treadmill"></label>
+              <label>Incline <small>%</small><input name="incline_pct" type="number" min="0" step="0.1" inputmode="decimal"></label>
+              <label>Speed <small>mph</small><input name="cardio_speed" type="number" min="0" step="0.1" inputmode="decimal"></label>
+            </div>
+          </details>
+
+          <details class="disclosure" id="daily-notes">
+            <summary><span class="disclosure-title">Notes</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
+            <label>Anything worth recording<textarea name="notes" rows="3"></textarea></label>
+          </details>
+
           <button type="submit">Send for readback</button><p class="status" role="status"></p>
         </form>
 
-        <form id="weekly-form" class="form-card stack" hidden>
+        <form id="weekly-form" class="form-card stack" role="tabpanel" aria-labelledby="tab-weekly" tabindex="0" hidden>
           <label>ISO week<input name="week" pattern="\d{4}-W\d{2}" placeholder="2026-W36" required></label>
           <div class="field-grid">
             <label>Waist <small>cm</small><input name="waist_cm" type="number" min="40" max="250" step="0.1" required></label>
@@ -101,27 +141,15 @@
           <button type="submit">Send weekly review</button><p class="status" role="status"></p>
         </form>
 
-        <form id="text-form" class="form-card stack" hidden>
+        <form id="text-form" class="form-card stack" role="tabpanel" aria-labelledby="tab-text" tabindex="0" hidden>
           <label>Date<input name="date" type="date" required></label>
           <label>Pasted app text or shorthand<textarea name="text" rows="10" placeholder="w 91.0 / 2180 172 208 61 / steps 7412" required></textarea></label>
           <button type="submit">Parse for readback</button><p class="status" role="status"></p>
         </form>
       </section>
 
-      <section id="upload" class="view" aria-labelledby="upload-title">
-        <div class="view-head"><div><p class="kicker">Evidence stays private</p><h2 id="upload-title">Upload</h2></div></div>
-        <form id="upload-form" class="form-card stack">
-          <label id="upload-date-field">Date<input name="date" type="date" required></label>
-          <label id="upload-week-field" hidden>ISO week<input name="week" pattern="\d{4}-W\d{2}" placeholder="2026-W36"></label>
-          <label>Source<select name="source" required><option value="fitnotes">FitNotes</option><option value="eatbetter">EatBetter</option><option value="mi-fitness">Mi Fitness / weekly band export</option></select></label>
-          <label>Screenshot or original export<input name="files" type="file" accept="image/png,image/jpeg,image/webp,.zip,.csv" multiple required></label>
-          <p class="hint">Files are moved into a private 30-day GitHub artifact. Permanent history keeps only the readback and file hashes.</p>
-          <button type="submit">Upload privately</button><p class="status" role="status"></p>
-        </form>
-      </section>
-
       <section id="review" class="view" aria-labelledby="review-title">
-        <div class="view-head"><div><p class="kicker"><span id="pending-count">0</span> awaiting you</p><h2 id="review-title">Review</h2></div><button id="review-refresh" class="quiet" type="button">Refresh</button></div>
+        <div class="view-head"><div><p class="kicker"><span id="pending-count">0</span> awaiting you<span id="review-queued"></span></p><h2 id="review-title">Review</h2></div><button id="review-refresh" class="quiet" type="button">Refresh</button></div>
         <div id="review-list" class="stack"><article class="card"><p class="muted">No readbacks loaded.</p></article></div>
       </section>
 
@@ -146,7 +174,6 @@
     <nav class="bottom-nav" aria-label="Main navigation">
       <button class="nav-item active" data-view="today" aria-current="page" type="button">Today</button>
       <button class="nav-item" data-view="entry" type="button">Log</button>
-      <button class="nav-item" data-view="upload" type="button">Upload</button>
       <button class="nav-item" data-view="review" type="button">Review</button>
       <button class="nav-item" data-view="history" type="button">History</button>
       <button class="nav-item" data-view="settings" type="button">Settings</button>

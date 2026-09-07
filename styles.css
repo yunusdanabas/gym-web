@@ -1,7 +1,12 @@
+/* Frame blocking: guard.js sets data-frame-check="ok" only in a top-level window.
+   GitHub Pages cannot send X-Frame-Options and a meta CSP cannot carry
+   frame-ancestors, so a framed document must simply never paint. */
+html:not([data-frame-check="ok"]) { visibility: hidden; }
+
 @font-face{font-family:Archivo;src:url("fonts/archivo.woff2") format("woff2");font-weight:100 900;font-display:swap}
 @font-face{font-family:"IBM Plex Sans";src:url("fonts/ibm-plex-sans.woff2") format("woff2");font-weight:400;font-display:swap}
 @font-face{font-family:"IBM Plex Mono";src:url("fonts/ibm-plex-mono.woff2") format("woff2");font-weight:400;font-display:swap}
-:root{color-scheme:light;--bg:#f4f1e8;--paper:#fffdf7;--ink:#18201b;--muted:#697169;--line:#d8d9d1;--sage:#34694b;--sage-soft:#dce9df;--rust:#8a4a1c;--danger:#a33232;--button-ink:#fff;--shadow:0 18px 48px rgba(24,32,27,.08);--radius:20px}
+:root{color-scheme:light;--bg:#f4f1e8;--paper:#fffdf7;--ink:#18201b;--muted:#5d655d;--line:#d8d9d1;--sage:#34694b;--sage-soft:#dce9df;--rust:#8a4a1c;--danger:#a33232;--button-ink:#fff;--shadow:0 18px 48px rgba(24,32,27,.08);--radius:20px}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#101612;--paper:#18211b;--ink:#eef3ee;--muted:#aab5ad;--line:#334139;--sage:#82bd96;--sage-soft:#233a2b;--rust:#e2a177;--danger:#ee8e8e;--button-ink:#0d1811;--shadow:none}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -39,11 +44,15 @@ h3{font-size:1.18rem;margin-bottom:.45rem}
 .stat{background:var(--sage-soft);border-radius:14px;padding:14px}.stat span{display:block;color:var(--muted);font-size:.76rem}.stat strong{display:block;font:700 1.25rem "IBM Plex Mono",monospace;margin-top:5px}
 .clean-list{list-style:none;padding:0;margin:0}.clean-list li{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-top:1px solid var(--line)}.clean-list small{display:block;color:var(--muted)}
 .segmented{display:flex;gap:6px;margin-bottom:14px;padding:5px;background:color-mix(in srgb,var(--line) 55%,transparent);border-radius:14px;overflow:auto}
-.segment,.nav-item,.quiet{border:0;background:transparent;color:var(--muted);font-weight:700;border-radius:10px;padding:10px 13px}
+.segment,.nav-item,.quiet{border:0;background:transparent;color:var(--muted);font-weight:700;border-radius:10px;padding:10px 13px;min-height:44px}
 .segment.active,.nav-item.active{background:var(--paper);color:var(--ink);box-shadow:0 2px 8px rgba(0,0,0,.06)}
 form{max-width:880px}
-label{display:grid;gap:7px;font-weight:650;color:var(--ink)}
+/* The caption and its unit sit on one line. As a grid, "Weight" and its <small>kg</small>
+   became two rows, which cost a line of height on every one of 38 fields and read as if
+   the unit were its own question. */
+label{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;font-weight:650;color:var(--ink)}
 label small{font-weight:400;color:var(--muted)}
+label>input,label>select,label>textarea{flex:0 0 100%;margin-top:7px}
 input,select,textarea{width:100%;border:1px solid var(--line);border-radius:11px;background:var(--bg);color:var(--ink);padding:11px 12px;min-height:46px}
 textarea{resize:vertical}
 fieldset{border:0;padding:0;margin:4px 0 12px}legend{font:700 .78rem "IBM Plex Mono",monospace;color:var(--sage);text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px}
@@ -55,7 +64,53 @@ button[type="submit"],#connection-test{border:0;border-radius:12px;background:va
 .status{min-height:1.3em;color:var(--sage);font:600 .84rem "IBM Plex Mono",monospace}.status.error{color:var(--danger)}
 .review-card header{display:flex;justify-content:space-between;gap:12px}.review-card .state{font:700 .72rem "IBM Plex Mono",monospace;color:var(--rust);text-transform:uppercase}.readback{display:grid;gap:0;margin:14px 0}.readback-row{display:grid;grid-template-columns:minmax(140px,1fr) 1.2fr auto;gap:10px;padding:10px 0;border-top:1px solid var(--line);align-items:start}.readback-row code{font-family:"IBM Plex Mono",monospace;white-space:pre-wrap;overflow-wrap:anywhere}.unread{color:var(--muted);font-style:italic}.source{color:var(--muted);font-size:.76rem}.review-actions{display:flex;gap:8px;flex-wrap:wrap}.review-actions button{border:0;border-radius:11px;padding:11px 15px;font-weight:700}.confirm{background:var(--sage);color:var(--button-ink)}.correct{background:var(--sage-soft);color:var(--ink)}
 .bottom-nav{position:fixed;z-index:8;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;padding:8px max(8px,calc((100vw - 720px)/2)) calc(8px + env(safe-area-inset-bottom));background:color-mix(in srgb,var(--paper) 92%,transparent);backdrop-filter:blur(18px);border-top:1px solid var(--line)}
-.nav-item{flex:1;min-width:0;padding:11px 5px;font-size:.75rem;white-space:nowrap}
+.nav-item{flex:1;min-width:0;padding:11px 5px;font-size:.75rem;white-space:nowrap;min-height:48px}
 @media(max-width:760px){.dashboard-grid,.field-grid{grid-template-columns:1fr 1fr}.exercise-row{grid-template-columns:repeat(3,minmax(0,1fr))}.exercise-name{grid-column:1/-1}.topbar{padding:14px 16px}.shell{padding-top:24px}.view-head{align-items:center}.topbar .kicker{display:none}}
-@media(max-width:480px){.field-grid,.stats{grid-template-columns:1fr 1fr}.readback-row{grid-template-columns:1fr auto}.readback-row code{grid-column:1/-1}.nav-item{font-size:.68rem}.header-actions #mode-pill{display:none}}
+@media(max-width:480px){.field-grid,.stats{grid-template-columns:1fr 1fr}.readback-row{grid-template-columns:1fr auto}.readback-row code{grid-column:1/-1}.nav-item{font-size:.7rem}.topbar h1{font-size:1.1rem}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+
+/* Shared notice styling, including entries waiting in the offline outbox. */
+.banner{margin:0 16px 12px;padding:11px 14px;border-radius:12px;background:var(--sage-soft);color:var(--ink);border:1px solid var(--line);font-size:.84rem;line-height:1.45}
+
+/* Progressive disclosure. The daily form is one scroll with 38 inputs; three numbers
+   are what he logs most days, so everything else collapses. The summary is a 44px tap
+   target and carries a live count, so a shut section never hides an entered value. */
+.lead-fields{margin-bottom:4px}
+.disclosure{border:1px solid var(--line);border-radius:14px;background:color-mix(in srgb,var(--sage-soft) 38%,transparent)}
+.disclosure+.disclosure{margin-top:-4px}
+.disclosure>summary{display:flex;align-items:center;gap:10px;min-height:44px;padding:12px 14px;cursor:pointer;border-radius:14px;list-style:none;
+  font:700 .78rem "IBM Plex Mono",monospace;color:var(--sage);text-transform:uppercase;letter-spacing:.1em}
+.disclosure>summary::-webkit-details-marker{display:none}
+.disclosure>summary::after{content:"+";font:700 1.15rem/1 "IBM Plex Mono",monospace;color:var(--muted)}
+.disclosure-note{margin-right:auto;font:400 .72rem "IBM Plex Mono",monospace;color:var(--muted);text-transform:none;letter-spacing:0}
+.disclosure[open]>summary::after{content:"–"}
+.disclosure>summary:focus-visible{outline:3px solid var(--sage);outline-offset:-3px}
+.disclosure>*:not(summary){padding:0 14px 14px}
+.disclosure>summary .disclosure-count{font:700 .72rem "IBM Plex Mono",monospace;color:var(--rust);text-transform:none;letter-spacing:0;
+  border:1px solid var(--rust);border-radius:999px;padding:3px 8px}
+.disclosure .exercise-list{padding-top:0}
+
+/* The offline queue: what is on this device and nowhere else. */
+.banner.outbox{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;border-color:var(--rust)}
+.banner.outbox button{flex:0 0 auto;min-height:44px}
+
+/* The working load is the reason the brief exists, so it leads the row rather than
+   sitting right-aligned in the smallest type on the card. */
+.load-list{list-style:none;padding:0;margin:0}
+.load-list li{display:flex;align-items:baseline;gap:14px;padding:12px 0;border-top:1px solid var(--line)}
+.load-list li:first-child{border-top:0}
+.load-list .load{flex:0 0 auto;min-width:4.4em;font:800 1.6rem/1 "IBM Plex Mono",monospace;color:var(--ink)}
+.load-list .load i{font:600 .7rem "IBM Plex Mono",monospace;font-style:normal;color:var(--muted);margin-left:3px}
+.load-list strong{display:block;font-size:.98rem}
+.load-list small{display:block;color:var(--muted);font-size:.76rem}
+.stat abbr{text-decoration:none;border-bottom:1px dotted currentColor}
+
+/* Focus must be visible: showView() moves it to the heading of the new view. */
+:focus-visible{outline:3px solid var(--sage);outline-offset:2px}
+.view-head h2:focus{outline:none}
+.view-head h2:focus-visible{outline:3px solid var(--sage);outline-offset:4px}
+
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}
