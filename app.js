@@ -3,7 +3,8 @@ import {CONFIG} from "./config.js";
 import {assertTopLevel, assertPathAllowed, clearCredentialFields, isFramed} from "./guard.js";
 import {
   pendingReadbacks, upgradeDeviceDb, outboxOrder, isNetworkFailure, isAlreadyDelivered,
-  isAuthFailure, DB_NAME, DB_VERSION, DEVICE_STORE, OUTBOX_STORE,
+  isAuthFailure, newerDraft, shouldPushDraft, DB_NAME, DB_VERSION, DEVICE_STORE,
+  OUTBOX_STORE, DRAFT_STORE,
 } from "./queue.js";
 
 const OWNER = CONFIG.owner;
@@ -24,12 +25,16 @@ let ledgerState = null;
 let blockConfig = null;
 let lockTimer = null;
 let queuedCount = 0;
+// Today's saved draft, for ticking off what is already logged on the Do next card.
+let todayDraft = null;
 let outboxNote = "";
 let draining = false;
 // Set by Correct, and cleared the moment the entry it referred to stops being the one
 // on screen. It used to be cleared only on a successful submit, so tapping Correct and
 // then changing the date carried the flag onto a different day.
 let correctionOf = "";
+let mealCatalog = [];
+let chosenMealIds = [];
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -112,6 +117,28 @@ const outboxEntries = () => withStore(OUTBOX_STORE, "readonly", store => store.g
 const outboxCount = () => withStore(OUTBOX_STORE, "readonly", store => store.count());
 const outboxDelete = id => withStore(OUTBOX_STORE, "readwrite", store => store.delete(id));
 const outboxClear = () => withStore(OUTBOX_STORE, "readwrite", store => store.clear());
+const draftPath = date => `queue/drafts/daily-${date}.json`;
+const localDrafts = () => withStore(DRAFT_STORE, "readonly", store => store.getAll());
+const deleteLocalDraft = date => withStore(DRAFT_STORE, "readwrite", store => store.delete(date));
+const draftsClear = () => withStore(DRAFT_STORE, "readwrite", store => store.clear());
+
+function makeDraft(date, payload) {
+  return {schema:1, interface:"web_draft_v1", kind:"daily", date, updated_at:chicagoTimestamp(), timezone:"America/Chicago", payload};
+}
+
+async function putLocalDraft(draft) {
+  if (!deviceKey) throw new Error("This device is locked, so nothing can be saved.");
+  const sealed = await sealWithKey(deviceKey, JSON.stringify(draft));
+  await withStore(DRAFT_STORE, "readwrite", store => store.put({date:draft.date, queued_at:draft.updated_at, ...sealed}));
+}
+
+async function getLocalDraft(date) {
+  if (!deviceKey) return null;
+  try {
+    const sealed = await withStore(DRAFT_STORE, "readonly", store => store.get(date));
+    return sealed ? JSON.parse(await openWithKey(deviceKey, sealed)) : null;
+  } catch (_) { return null; }
+}
 
 // config/block.json is the one file the *write* path needs: without it there are no
 // exercise rows, so a done or partial session could never clear its own guard offline.
@@ -223,6 +250,71 @@ async function putFile(path, bytes, message, branch = MAIN) {
 
 async function putJson(path, value, message, branch = MAIN) {
   return putFile(path, encoder.encode(JSON.stringify(value, null, 2) + "\n"), message, branch);
+}
+
+async function upsertJson(path, value, message) {
+  assertPathAllowed(path, WRITE_PREFIXES, "write");
+  assertPathAllowed(path, READ_PREFIXES, "read");
+  let sha;
+  try {
+    const file = await github(`/contents/${apiPath(path)}?ref=${encodeURIComponent(MAIN)}`);
+    sha = file.sha;
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+  const body = {message, branch: MAIN, content: bytesToB64(encoder.encode(JSON.stringify(value, null, 2) + "\n"))};
+  if (sha) body.sha = sha;
+  return github(`/contents/${apiPath(path)}`, {method:"PUT", body:JSON.stringify(body)});
+}
+
+async function deleteRepoFile(path, message) {
+  assertPathAllowed(path, WRITE_PREFIXES, "write");
+  assertPathAllowed(path, READ_PREFIXES, "read");
+  try {
+    const file = await github(`/contents/${apiPath(path)}?ref=${encodeURIComponent(MAIN)}`);
+    await github(`/contents/${apiPath(path)}`, {method:"DELETE", body:JSON.stringify({message, sha:file.sha, branch:MAIN})});
+  } catch (error) {
+    if (error.status === 404) return;
+    throw error;
+  }
+}
+
+async function getRemoteDraft(date) {
+  try {
+    return (await getJsonFile(draftPath(date))).value;
+  } catch (error) {
+    if (error.status === 404) return null;
+    throw error;
+  }
+}
+
+async function drainDrafts() {
+  if (!token || !deviceKey) return;
+  for (const entry of await localDrafts()) {
+    let draft;
+    try { draft = JSON.parse(await openWithKey(deviceKey, entry)); }
+    catch (_) { continue; }
+    let remote = null;
+    try { remote = await getRemoteDraft(draft.date); }
+    catch (error) {
+      if (isNetworkFailure(error) || isAuthFailure(error)) break;
+      if (error.status !== 404) continue;
+    }
+    if (!shouldPushDraft(draft, remote)) continue;
+    try { await upsertJson(draftPath(draft.date), draft, `web: save draft ${draft.date}`); }
+    catch (error) {
+      if (isNetworkFailure(error) || isAuthFailure(error)) break;
+    }
+  }
+}
+
+async function discardDraft(date) {
+  try { await deleteLocalDraft(date); } catch (_) {}
+  if (!token) return;
+  try { await deleteRepoFile(draftPath(date), `web: clear draft ${date}`); }
+  catch (error) {
+    if (error.status !== 404 && !isNetworkFailure(error)) throw error;
+  }
 }
 
 function setStatus(form, message, error = false) {
@@ -359,6 +451,18 @@ function dailyPayload(form) {
   if (exercises.length) session.exercises = exercises;
   if (Object.keys(session).length) payload.session = session;
   if (data.get("notes").trim()) payload.notes = data.get("notes").trim();
+  const pastedRaw = data.get("pasted_text");
+  if (pastedRaw && String(pastedRaw).trim()) payload.text = String(pastedRaw).trim();
+  if (chosenMealIds.length) {
+    payload.chosen_meals = [...chosenMealIds];
+    const summed = sumMealMacros(chosenMealIds);
+    if (payload.nutrition) {
+      for (const key of ["kcal", "protein_g", "carbs_g", "fat_g"]) {
+        if (payload.nutrition[key] === summed[key]) delete payload.nutrition[key];
+      }
+      if (!Object.keys(payload.nutrition).length) delete payload.nutrition;
+    }
+  }
   return payload;
 }
 
@@ -376,9 +480,11 @@ async function submitMain(item, form) {
     queued = true;
   }
   if (item.supersedes) correctionOf = "";
+  if (item.date) { try { await discardDraft(item.date); } catch (_) {} }
   form.reset();
   const dateInput=$("input[name=date]", form);
   if(dateInput)dateInput.value=chicagoDate();
+  if (form.id === "daily-form") { chosenMealIds = []; renderMealChips(); }
   // reset() fires no input event, so the counts have to be recomputed by hand.
   updateDisclosureCounts();
   setStatus(form, queued
@@ -402,7 +508,298 @@ async function refreshState() {
     // No state file yet: a first run, not a failure.
     ledgerState = {pending_count:0, readbacks:[], outcomes:[], history:[]};
   }
+  await refreshTodayDraft(ledgerState?.brief?.date);
   renderToday(); renderReview(); renderHistory();
+}
+
+// The Do next card ticks exercises he has already saved today. The draft is read once
+// here rather than inside renderToday, which runs on every outbox change too.
+async function refreshTodayDraft(date) {
+  todayDraft = null;
+  if (!date) return;
+  let local = null;
+  let remote = null;
+  try { local = await getLocalDraft(date); } catch (_) {}
+  if (token && navigator.onLine) {
+    try { remote = await getRemoteDraft(date); } catch (_) {}
+  }
+  todayDraft = newerDraft(local, remote);
+}
+
+function fmtNum(value, digits) {
+  if (value == null || value === "") return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return number.toFixed(digits);
+}
+
+function formatTarget(target) {
+  return String(target || "").replace("x", "×");
+}
+
+function setNamed(form, name, value) {
+  const field = form.querySelector(`[name="${name}"]`);
+  if (!field || value === undefined || value === null) return;
+  field.value = String(value);
+}
+
+function mealById(id) {
+  return mealCatalog.find(meal => meal.id === id);
+}
+
+function sumMealMacros(ids) {
+  const totals = {};
+  for (const id of ids) {
+    const meal = mealById(id);
+    if (!meal) continue;
+    for (const key of ["kcal", "protein_g", "carbs_g", "fat_g"]) {
+      if (meal[key] == null) continue;
+      totals[key] = (totals[key] || 0) + Number(meal[key]);
+    }
+  }
+  return totals;
+}
+
+function applyMealDelta(form, meal, sign) {
+  const names = {kcal: "kcal", protein_g: "protein_g", carbs_g: "carbs_g", fat_g: "fat_g"};
+  for (const [fieldName, key] of Object.entries(names)) {
+    if (meal[key] == null) continue;
+    const field = form.querySelector(`[name="${fieldName}"]`);
+    if (!field) continue;
+    const current = field.value === "" ? 0 : Number(field.value);
+    const next = current + sign * Number(meal[key]);
+    field.value = next > 0 ? String(next) : "";
+  }
+  updateDisclosureCounts();
+}
+
+function renderMealChips() {
+  const root = $("#meal-chips");
+  if (!root) return;
+  if (!mealCatalog.length) {
+    root.innerHTML = `<p class="hint">No stored meals yet. Add one below with the kcal you actually measured.</p>`;
+    return;
+  }
+  root.innerHTML = mealCatalog.map(meal => {
+    const selected = chosenMealIds.includes(meal.id);
+    const macros = [meal.kcal != null ? `${meal.kcal} kcal` : "", meal.protein_g != null ? `${meal.protein_g} g P` : ""]
+      .filter(Boolean).join(" · ");
+    return `<button type="button" class="chip${selected ? " active" : ""}" data-meal-id="${esc(meal.id)}">${esc(meal.name)}<small>${esc(macros)}</small></button>`;
+  }).join("");
+}
+
+async function loadMealCatalog() {
+  const byId = new Map();
+  if (!token) {
+    mealCatalog = [];
+    renderMealChips();
+    return;
+  }
+  try {
+    const file = await getJsonFile(CONFIG.mealChoicesPath);
+    for (const meal of file.value.meals || []) {
+      if (meal && meal.id && meal.kcal != null) byId.set(meal.id, meal);
+    }
+  } catch (error) {
+    if (error.status !== 404 && !isNetworkFailure(error)) throw error;
+  }
+  try {
+    assertPathAllowed("queue/meals/", READ_PREFIXES, "read");
+    const items = await github(`/contents/${apiPath("queue/meals")}?ref=${encodeURIComponent(MAIN)}`);
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (!item.name || !item.name.endsWith(".json")) continue;
+        const meal = (await getJsonFile(`queue/meals/${item.name}`)).value;
+        if (meal && meal.id && meal.kcal != null) byId.set(meal.id, meal);
+      }
+    }
+  } catch (error) {
+    if (error.status !== 404 && !isNetworkFailure(error)) throw error;
+  }
+  mealCatalog = [...byId.values()];
+  renderMealChips();
+}
+
+function mealIdFromName(name) {
+  return String(name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function applyDailyPayload(form, payload) {
+  if (!payload || typeof payload !== "object") return;
+  setNamed(form, "weight_kg", payload.body?.weight_kg);
+  setNamed(form, "sleep_hours", payload.sleep?.hours);
+  setNamed(form, "resting_hr", payload.readiness?.resting_hr);
+  setNamed(form, "kcal", payload.nutrition?.kcal);
+  setNamed(form, "protein_g", payload.nutrition?.protein_g);
+  setNamed(form, "carbs_g", payload.nutrition?.carbs_g);
+  setNamed(form, "fat_g", payload.nutrition?.fat_g);
+  setNamed(form, "fiber_g", payload.nutrition?.fiber_g);
+  setNamed(form, "water_ml", payload.nutrition?.water_ml);
+  setNamed(form, "unplanned_eating", payload.nutrition?.unplanned_eating);
+  setNamed(form, "steps", payload.activity?.steps);
+  const cardio = Array.isArray(payload.activity?.cardio) ? payload.activity.cardio[0] : payload.activity?.cardio;
+  if (cardio) {
+    setNamed(form, "cardio_min", cardio.min);
+    if (cardio.type) setNamed(form, "cardio_type", cardio.type);
+    setNamed(form, "incline_pct", cardio.incline_pct);
+    setNamed(form, "cardio_speed", cardio.speed);
+  }
+  setNamed(form, "session_status", payload.session?.status);
+  setNamed(form, "session_minutes", payload.session?.minutes);
+  if (payload.session && payload.session.pain !== undefined) {
+    setNamed(form, "pain", payload.session.pain ? "true" : "false");
+  }
+  if (payload.notes) setNamed(form, "notes", payload.notes);
+  if (payload.text) setNamed(form, "pasted_text", payload.text);
+  if (Array.isArray(payload.chosen_meals)) {
+    chosenMealIds = payload.chosen_meals.filter(id => mealById(id));
+    renderMealChips();
+  }
+  for (const exercise of payload.session?.exercises || []) {
+    const rows = $$(".exercise-row", form);
+    const row = rows.find(item => item.dataset.planName === exercise.name)
+      || rows.find(item => !$(".actual-name", item).value && $$(".set", item).every(input => input.value === ""));
+    if (!row) continue;
+    if (exercise.name && exercise.name !== row.dataset.planName) $(".actual-name", row).value = exercise.name;
+    if (exercise.weight !== undefined) $(".load", row).value = exercise.weight;
+    if (exercise.rir_last !== undefined) $(".rir", row).value = exercise.rir_last;
+    $$(".set", row).forEach((input, index) => {
+      if (exercise.sets && exercise.sets[index] !== undefined) input.value = exercise.sets[index];
+    });
+  }
+  updateDisclosureCounts();
+  for (const details of $$("details.disclosure", form)) {
+    if (countEntered(details)) details.open = true;
+  }
+}
+
+function resetDailyForm(date) {
+  const form = $("#daily-form");
+  const dateInput = $("input[name=date]", form);
+  form.reset();
+  if (dateInput) dateInput.value = date;
+  chosenMealIds = [];
+  renderMealChips();
+  renderExercises(date);
+  updateDisclosureCounts();
+}
+
+async function loadDailyDraft(date) {
+  resetDailyForm(date);
+  let local = null;
+  let remote = null;
+  try { local = await getLocalDraft(date); } catch (_) {}
+  if (token && navigator.onLine) {
+    try { remote = await getRemoteDraft(date); }
+    catch (error) { if (!isNetworkFailure(error)) throw error; }
+  }
+  const draft = newerDraft(local, remote);
+  if (draft && remote && draft === remote) {
+    try { await putLocalDraft(draft); } catch (_) {}
+  }
+  if (draft?.payload) applyDailyPayload($("#daily-form"), draft.payload);
+}
+
+function restoreDailyDraftIfEmpty() {
+  const form = $("#daily-form");
+  const date = $("input[name=date]", form).value;
+  if (!date || countEntered(form)) return;
+  loadDailyDraft(date).catch(error => setStatus(form, error.message, true));
+}
+
+// ---------------------------------------------------------------- the deck
+// Four cards, one screen each, on the first page he opens. Horizontal scroll-snap in
+// styles.css does the paging: a carousel library would be the only dependency in the
+// app, and the platform already ships this.
+
+const sameExercise = (a, b) => normalizeName(a) === normalizeName(b);
+const normalizeName = value => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+// Only sets that were actually recorded count as logged; an empty row is not progress.
+function loggedExerciseNames() {
+  return (todayDraft?.payload?.session?.exercises || [])
+    .filter(item => (item.sets || []).length)
+    .map(item => item.name);
+}
+
+function deckCard(kicker, body, label) {
+  return `<article class="card deck-card" tabindex="0" role="group" aria-label="${esc(label)}"><p class="kicker">${esc(kicker)}</p>${body}</article>`;
+}
+
+function doNextCard(brief, train) {
+  const items = train.exercises || [];
+  if (!items.length) {
+    const outstanding = (brief.needs_you || []).find(item => item.severity === "warn");
+    return deckCard("Do next", `<p class="hero-line">Rest day</p><p class="muted">${outstanding
+      ? esc(outstanding.what)
+      : "Nothing outstanding. Log weight and steps when you have them."}</p>`, "Do next");
+  }
+  const logged = loggedExerciseNames();
+  const isLogged = item => logged.some(name => sameExercise(name, item.name));
+  const done = items.filter(isLogged).length;
+  const rows = items.map(item => {
+    const load = item.load == null ? "establish" : `${item.load} ${item.unit || "lb"}`;
+    return `<li class="${isLogged(item) ? "logged" : ""}"><b class="tick" aria-hidden="true">${isLogged(item) ? "\u2713" : "\u00b7"}</b><span><strong>${esc(item.name)}</strong><small>${esc(formatTarget(item.target))} \u00b7 ${esc(load)}</small></span></li>`;
+  }).join("");
+  return deckCard(`Do next \u00b7 ${train.session || ""}${train.time ? ` \u00b7 ${train.time}` : ""}`,
+    `<p class="hero-line">${done}/${items.length} logged</p><ul class="load-list ticks">${rows}</ul>${train.cardio
+      ? `<p class="hint">Cardio: ${esc(train.cardio.min)} min ${esc(train.cardio.type)}</p>` : ""}`,
+    "Do next, today's session");
+}
+
+// A line, not a chart library: the meta-CSP is default-src 'self', so nothing external
+// could load anyway, and 30 points need no more than a polyline.
+function weightSparkline(history) {
+  const points = (history || []).filter(item => typeof item.weight_kg === "number")
+    .map(item => item.weight_kg).reverse();
+  if (points.length < 2) return "";
+  const low = Math.min(...points);
+  const span = Math.max(...points) - low || 1;
+  const coords = points.map((value, index) =>
+    `${(index / (points.length - 1) * 100).toFixed(2)},${(100 - (value - low) / span * 100).toFixed(2)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Body weight across the last ${points.length} logged days, ${esc(fmtNum(points[0], 2))} to ${esc(fmtNum(points[points.length - 1], 2))} kg"><polyline points="${coords}"/></svg>`;
+}
+
+function standingCard(standing, history) {
+  const trend = standing.trend_kg_per_week;
+  // A rate needs its sign and its unit, or -1.35 reads as a weight.
+  const trendText = trend == null ? "\u2014"
+    : `${trend > 0 ? "+" : "\u2212"}${fmtNum(Math.abs(trend), 2)} kg/wk`;
+  return deckCard("Where you stand", `
+    <p class="hero-line">${esc(fmtNum(standing.weight_avg_7d_kg, 2))} kg</p>
+    <p class="muted">7-day average \u00b7 ${esc(trendText)}${standing.trend_verdict ? ` \u00b7 ${esc(standing.trend_verdict)}` : ""}</p>
+    ${weightSparkline(history)}
+    <div class="stats">
+      <div class="stat"><span>Records confirmed</span><strong>${esc(standing.records_confirmed ?? 0)}/${esc(standing.records_total ?? 0)}</strong></div>
+      <div class="stat"><span>Steps yesterday</span><strong>${esc(standing.steps_yesterday ?? "\u2014")}${standing.steps_target ? ` / ${esc(standing.steps_target)}` : ""}</strong></div>
+    </div>`, "Where you stand");
+}
+
+function adherenceCard(adherence) {
+  const streak = adherence.logged_day_streak ?? 0;
+  const lifting = adherence.lifting_adherence;
+  return deckCard("Adherence", `
+    <p class="hero-line">${lifting == null ? "\u2014" : `${esc(fmtNum(lifting, 0))}%`}</p>
+    <p class="muted">Lifting this week \u00b7 ${esc(adherence.sessions_done ?? 0)} done${adherence.sessions_partial
+      ? ` + ${esc(adherence.sessions_partial)} partial` : ""} of ${esc(adherence.sessions_planned ?? 0)}</p>
+    <div class="stats">
+      <div class="stat"><span>Cardio</span><strong>${esc(adherence.cardio_min ?? 0)}/${esc(adherence.cardio_planned ?? 0)} min</strong></div>
+      <div class="stat"><span>Logged streak</span><strong>${esc(streak)} ${streak === 1 ? "day" : "days"}</strong></div>
+      <div class="stat"><span>Working sets</span><strong>${esc(adherence.work_sets ?? 0)}</strong></div>
+      <div class="stat"><span>Pending</span><strong>${esc(ledgerState.pending_count || 0)}</strong></div>
+      ${queuedCount ? `<div class="stat"><span>Queued here</span><strong id="today-queued">${esc(queuedCount)}</strong></div>` : ""}
+    </div>
+    <p class="hint">Confirmed records only \u2014 an unconfirmed day counts for nothing here.</p>`,
+    "Adherence this week");
+}
+
+function verdictCard(brief) {
+  const parts = [];
+  if (brief.review?.body) parts.push(`<p class="kicker sub">Last night</p><p class="lookback">${esc(brief.review.body)}</p>`);
+  if (brief.lookback?.body) parts.push(`<p class="kicker sub">This morning</p><p class="lookback">${esc(brief.lookback.body)}</p>`);
+  return deckCard("Verdict", parts.length ? `<div class="prose">${parts.join("")}</div>`
+    : `<p class="muted">Nothing written yet. The 23:30 close-out and the 07:30 lookback fill this in; if both stay empty, the timers are not running.</p>`,
+    "The coach's verdict");
 }
 
 function renderToday() {
@@ -411,29 +808,38 @@ function renderToday() {
   if (!brief) {
     target.innerHTML = `<article class="card"><p class="muted">${navigator.onLine
       ? "The first private summary has not been published yet."
-      : "No signal, so the brief could not be loaded. You can still log — entries queue on this device and send when you reconnect."}</p></article>`;
+      : "No signal, so the brief could not be loaded. You can still log \u2014 entries queue on this device and send when you reconnect."}</p></article>`;
     return;
   }
-  $("#today-date").textContent = `${brief.date} · ${brief.week}`;
+  $("#today-date").textContent = `${brief.date} \u00b7 ${brief.week}`;
   const train = brief.train || {};
-  const standing = brief.standing || {};
   target.innerHTML = `
-    <article class="card wide"><p class="kicker">Train · ${esc(train.session || "Rest")}${train.time ? ` · ${esc(train.time)}` : ""}</p>
-      <ul class="load-list">${(train.exercises || []).map(item => `<li><b class="load">${item.load == null ? "establish" : `${esc(item.load)}<i>${esc(item.unit)}</i>`}</b><span><strong>${esc(item.name)}</strong><small>${esc(item.target)} · ${esc(item.basis)}</small></span></li>`).join("") || "<li>Rest day</li>"}</ul>
-      ${train.cardio ? `<p class="hint">Cardio: ${esc(train.cardio.min)} min ${esc(train.cardio.type)}</p>` : ""}</article>
-    <article class="card"><p class="kicker">Standing</p><div class="stats"><div class="stat"><span>7-day avg</span><strong>${esc(standing.weight_avg_7d_kg ?? "—")} kg</strong></div><div class="stat"><span>14-day trend <abbr title="kilograms per week">kg/wk</abbr></span><strong>${esc(standing.trend_kg_per_week ?? "—")}</strong></div><div class="stat"><span>Sessions</span><strong>${esc(standing.sessions_done_this_week ?? 0)}/${esc(standing.sessions_planned_this_week ?? 0)}</strong></div><div class="stat"><span>Pending</span><strong>${esc(ledgerState.pending_count || 0)}</strong></div><div class="stat"><span>Queued here</span><strong id="today-queued">${esc(queuedCount)}</strong></div></div></article>
-    <article class="card"><p class="kicker">Needs you</p><ul class="clean-list">${(brief.needs_you || []).map(item => `<li><span><strong>${esc(item.kind)}</strong><small>${esc(item.what)}</small></span></li>`).join("") || "<li>Nothing flagged.</li>"}</ul></article>`;
+    <div class="deck" role="group" aria-label="Today at a glance">${doNextCard(brief, train)}${
+      standingCard(brief.standing || {}, ledgerState.history)}${
+      adherenceCard(brief.adherence || {})}${verdictCard(brief)}</div>
+    <article class="card wide"><p class="kicker">Train \u00b7 ${esc(train.session || "Rest")}${train.time ? ` \u00b7 ${esc(train.time)}` : ""}</p>
+      <ul class="load-list">${(train.exercises || []).map(item => {
+        const load = item.load == null ? "establish" : `${item.load} ${item.unit || "lb"}`;
+        return `<li><b class="sets">${esc(formatTarget(item.target))}</b><span><strong>${esc(item.name)}</strong><small>${esc(load)} \u00b7 ${esc(item.basis)}</small></span></li>`;
+      }).join("") || "<li>Rest day</li>"}</ul>
+      ${train.cardio ? `<p class="hint">Cardio: ${esc(train.cardio.min)} min ${esc(train.cardio.type)}</p>` : ""}</article>`;
 }
 
 async function renderReview() {
   $("#pending-count").textContent = ledgerState?.pending_count || 0;
   const list = $("#review-list");
   const pending = pendingReadbacks(ledgerState);
+  // Needs you lives here, not on Today. This is already the "awaiting you" view — its
+  // kicker counts exactly this — and on Today it competed with the day's program.
+  const needs = ledgerState?.brief?.needs_you || [];
+  const needsCard = `<article class="card"><p class="kicker">Needs you</p><ul class="clean-list">${needs.map(item =>
+    `<li><span><strong>${esc(item.kind)}</strong><small>${esc(item.what)}</small></span>${item.action
+      ? `<code>${esc(item.action)}</code>` : ""}</li>`).join("") || "<li>Nothing flagged.</li>"}</ul></article>`;
   if (!pending.length) {
-    list.innerHTML = `<article class="card"><p class="muted">Nothing is waiting for confirmation.</p></article>`;
+    list.innerHTML = `<article class="card"><p class="muted">Nothing is waiting for confirmation.</p></article>${needsCard}`;
     return;
   }
-  list.innerHTML = pending.map(item => `<article class="card review-card" data-readback-path="${esc(item.path)}" data-id="${esc(item.id)}" data-kind="${esc(item.kind)}" data-target="${esc(item.date || item.week)}" data-hash="${esc(item.readback_sha256)}"><header><div><p class="kicker">${esc(item.date || item.week)}</p><h3>${esc(item.kind)} entry</h3></div><span class="state">${esc(item.state)}</span></header><div class="readback"><p class="muted">Open review to load the complete field-by-field readback.</p></div><div class="review-actions"><button class="correct" type="button">Open review</button></div></article>`).join("");
+  list.innerHTML = pending.map(item => `<article class="card review-card" data-readback-path="${esc(item.path)}" data-id="${esc(item.id)}" data-kind="${esc(item.kind)}" data-target="${esc(item.date || item.week)}" data-hash="${esc(item.readback_sha256)}"><header><div><p class="kicker">${esc(item.date || item.week)}</p><h3>${esc(item.kind)} entry</h3></div><span class="state">${esc(item.state)}</span></header><div class="readback"><p class="muted">Open review to load the complete field-by-field readback.</p></div><div class="review-actions"><button class="correct" type="button">Open review</button></div></article>`).join("") + needsCard;
 }
 
 async function openReadback(card) {
@@ -478,7 +884,7 @@ function showView(name) {
   }
 }
 
-const ENTRY_TABS = ["daily","weekly","text"];
+const ENTRY_TABS = ["daily","weekly"];
 
 function showEntryTab(name, moveFocus = false) {
   clearCorrection();
@@ -517,6 +923,7 @@ async function unlock(value, key) {
     if (!(await connectionTest())) throw new Error("The token cannot access the expected private repository.");
     blockConfig = (await getJsonFile(CONFIG.blockPath)).value;
     await cacheBlockConfig(blockConfig);
+    try { await loadMealCatalog(); } catch (_) {}
   } catch (error) {
     // The passphrase has already proved itself — it decrypted the token before any of
     // this ran. What fails here is only GitHub's liveness check, and refusing to open
@@ -532,10 +939,13 @@ async function unlock(value, key) {
     ledgerState = null;
     await renderOutbox();
     renderToday(); renderReview(); renderHistory();
+    if (!countEntered($("#daily-form"))) await loadDailyDraft($("#daily-form [name=date]").value).catch(() => {});
   } else {
     await refreshState();
     // Anything typed without signal goes out now that the token is in hand.
     await drainOutbox();
+    await drainDrafts();
+    if (!countEntered($("#daily-form"))) await loadDailyDraft($("#daily-form [name=date]").value).catch(() => {});
   }
 }
 
@@ -643,17 +1053,138 @@ $("#weekly-form").addEventListener("submit", async event => {
   catch (error) { setStatus(form,error.message,true); }
 });
 
-$("#text-form").addEventListener("submit", async event => {
-  event.preventDefault(); const form=event.currentTarget,data=new FormData(form);
-  try { await submitMain(makeSubmission("text", {date:data.get("date")}, {text:data.get("text")}), form); }
-  catch (error) { setStatus(form,error.message,true); }
+$("#meal-chips").addEventListener("click", event => {
+  const button = event.target.closest("[data-meal-id]");
+  if (!button) return;
+  const meal = mealById(button.dataset.mealId);
+  if (!meal) return;
+  const form = $("#daily-form");
+  const index = chosenMealIds.indexOf(meal.id);
+  if (index >= 0) {
+    chosenMealIds.splice(index, 1);
+    applyMealDelta(form, meal, -1);
+  } else {
+    chosenMealIds.push(meal.id);
+    applyMealDelta(form, meal, 1);
+  }
+  renderMealChips();
+  $("#daily-meals").open = true;
 });
 
-// The Upload route is gone, not merely disabled. Evidence travelled on a temporary
-// `upload-*` branch and deleting that branch does not delete its Git objects, so the
-// app's 30-day deletion promise could not be kept. The scheduled evidence reader the
-// tab pointed at was never built either, so an upload dead-ended. Screenshot ingest
-// runs from the laptop (`./gym ingest`) until storage with real deletion exists.
+$("#add-meal").addEventListener("click", async () => {
+  const form = $("#daily-form");
+  try {
+    assertTopLevel();
+    const name = $("#meal-name").value.trim();
+    const kcal = $("#meal-kcal").value;
+    if (!name) throw new Error("A stored meal needs a name.");
+    if (kcal === "") throw new Error("A stored meal needs the exact kcal you measured.");
+    const id = mealIdFromName(name);
+    if (!id) throw new Error("That name does not make a usable meal id.");
+    const meal = {id, name, kcal: Number.parseInt(kcal, 10)};
+    const items = $("#meal-items").value.trim();
+    if (items) meal.items = items;
+    for (const [fieldId, key] of [["meal-protein", "protein_g"], ["meal-carbs", "carbs_g"], ["meal-fat", "fat_g"]]) {
+      if ($(`#${fieldId}`).value !== "") meal[key] = Number.parseInt($(`#${fieldId}`).value, 10);
+    }
+    await upsertJson(`queue/meals/${id}.json`, meal, `web: store meal ${id}`);
+    const existing = mealCatalog.findIndex(item => item.id === id);
+    if (existing >= 0) mealCatalog[existing] = meal;
+    else mealCatalog.push(meal);
+    renderMealChips();
+    for (const fieldId of ["meal-name", "meal-items", "meal-kcal", "meal-protein", "meal-carbs", "meal-fat"]) {
+      $(`#${fieldId}`).value = "";
+    }
+    setStatus(form, `Stored ${name}. Tap it to add those macros.`);
+    updateDisclosureCounts();
+  } catch (error) { setStatus(form, error.message, true); }
+});
+
+$("#save-draft").addEventListener("click", async () => {
+  const form = $("#daily-form");
+  try {
+    assertTopLevel();
+    setStatus(form, "Saving…");
+    const date = new FormData(form).get("date");
+    const payload = dailyPayload(form);
+    if (!payload || !Object.keys(payload).length) throw new Error("Enter at least one observed value.");
+    const draft = makeDraft(date, payload);
+    await putLocalDraft(draft);
+    try {
+      await upsertJson(draftPath(date), draft, `web: save draft ${date}`);
+      setStatus(form, "Saved. Send for readback when the day is finished, or leave it for the night pull.");
+    } catch (error) {
+      if (!isNetworkFailure(error)) throw error;
+      setStatus(form, "Saved on this device — it will reach the inbox when you have signal.");
+    }
+  } catch (error) { setStatus(form, error.message, true); }
+});
+
+// ---------------------------------------------------------------- photo evidence
+// Photos go straight to `queue/evidence/` in the private inbox through the Contents
+// API. No `upload-*` branch and no artifact: the branch scheme was removed because
+// deleting a branch does not delete its Git objects, and the transport stays dead
+// (webapp/test.mjs still forbids the ref API). What replaced it makes no deletion
+// promise instead — `./gym web route` moves each file to the laptop and removes it from
+// the inbox's `main`, but the blob remains in that private repository's history. A
+// photo is evidence for `./gym ingest` to read, never a value: nothing here touches the
+// submission payload, and no number reaches the record without a confirmed read-back.
+
+const MAX_PHOTO_EDGE = 1600;
+const uploadedPhotos = [];
+
+// Downscaled in the browser because the Contents API carries base64: a 4 MB phone photo
+// is ~5.5 MB on the wire and lands forever in the inbox's history at that size.
+async function shrinkPhoto(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, MAX_PHOTO_EDGE / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.82));
+  if (!blob) throw new Error("This photo could not be read on this device.");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+function renderPhotoList() {
+  $("#photo-list").innerHTML = uploadedPhotos.map(item =>
+    `<li><span><strong>${esc(item.name)}</strong><small>${esc(item.path)}</small></span><code>${esc(item.state)}</code></li>`).join("");
+}
+
+$("#photo-input").addEventListener("change", async event => {
+  const form = $("#daily-form");
+  const input = event.currentTarget;
+  const files = [...input.files];
+  input.value = "";
+  if (!files.length) return;
+  const date = new FormData(form).get("date");
+  try {
+    assertTopLevel();
+    if (!date) throw new Error("Set the date before adding photos.");
+    for (const file of files) {
+      const entry = {name: file.name, path: "", state: "sending"};
+      uploadedPhotos.push(entry);
+      renderPhotoList();
+      try {
+        const bytes = await shrinkPhoto(file);
+        entry.path = `queue/evidence/${date}-${crypto.randomUUID()}.jpg`;
+        await putFile(entry.path, bytes, `web: evidence ${date}`);
+        entry.state = "sent";
+      } catch (error) {
+        // Kept in the list rather than dropped: a photo he believes he sent and did not
+        // is worse than one he can see failed.
+        entry.state = "failed";
+        setStatus(form, `${file.name}: ${error.message}`, true);
+      }
+      renderPhotoList();
+    }
+    if (uploadedPhotos.every(item => item.state === "sent")) {
+      setStatus(form, `${uploadedPhotos.length} photo(s) in the inbox. Read them on the laptop with ./gym ingest ${date}.`);
+    }
+  } catch (error) { setStatus(form, error.message, true); }
+});
 
 $("#review-list").addEventListener("click", async event => {
   const card=event.target.closest(".review-card"); if (!card) return;
@@ -703,8 +1234,14 @@ $(".segmented").addEventListener("keydown", event => {
     : (current + step + ENTRY_TABS.length) % ENTRY_TABS.length;
   showEntryTab(ENTRY_TABS[next], true);
 });
-$$('[data-view]').forEach(button=>button.addEventListener("click",()=>showView(button.dataset.view)));
-$("#daily-form [name=date]").addEventListener("change",event=>{clearCorrection(); renderExercises(event.target.value);});
+$$('[data-view]').forEach(button=>button.addEventListener("click",()=>{
+  showView(button.dataset.view);
+  if (button.dataset.view === "entry") restoreDailyDraftIfEmpty();
+}));
+$("#daily-form [name=date]").addEventListener("change",event=>{
+  clearCorrection();
+  loadDailyDraft(event.target.value).catch(error=>setStatus($("#daily-form"), error.message, true));
+});
 for (const eventName of ["input","change"]) $("#daily-form").addEventListener(eventName, updateDisclosureCounts);
 $("#weekly-form [name=week]").addEventListener("change",clearCorrection);
 $("#refresh-button").addEventListener("click",()=>refreshState().catch(error=>alert(error.message)));
@@ -720,13 +1257,14 @@ $("#clear-device").addEventListener("click",async()=>{
   await db("delete");
   await deviceValue("delete", "block");
   await outboxClear();
+  await draftsClear();
   lock();
   outboxNote = "";
   await renderOutbox();
   await initializeGate();
 });
 $("#theme-toggle").addEventListener("click",()=>{const next=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=next;localStorage.setItem("gym-theme",next)});
-window.addEventListener("online",()=>{setNetworkState(); drainOutbox().catch(()=>{});});
+window.addEventListener("online",()=>{setNetworkState(); drainOutbox().catch(()=>{}); drainDrafts().catch(()=>{});});
 window.addEventListener("offline",setNetworkState);
 $("#outbox-send").addEventListener("click",()=>{drainOutbox().catch(error=>{outboxNote=error.message; renderOutbox();});});
 for (const eventName of ["pointerdown","keydown","touchstart"]) document.addEventListener(eventName,resetLockTimer,{passive:true});

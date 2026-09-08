@@ -105,10 +105,17 @@ clearCredentialFields(resetlessDoc);
 assert.deepEqual(resetlessDoc.inputs.map(input => input.value), ["", ""]);
 
 // --- finding 1: the browser credential may only touch the inbox ------------
-assert.deepEqual(CONFIG.writePrefixes, ["queue/confirmations/", "queue/submissions/"]);
+assert.deepEqual(CONFIG.writePrefixes, ["queue/confirmations/", "queue/drafts/", "queue/evidence/", "queue/meals/", "queue/submissions/"]);
 for (const prefix of CONFIG.writePrefixes) assert.equal(prefix.startsWith("queue/"), true);
 assert.equal(pathAllowed("queue/submissions/abc.json", CONFIG.writePrefixes), true);
 assert.equal(pathAllowed("queue/confirmations/abc.json", CONFIG.writePrefixes), true);
+assert.equal(pathAllowed("queue/drafts/daily-2026-09-07.json", CONFIG.writePrefixes), true);
+assert.equal(pathAllowed("queue/drafts/daily-2026-09-07.json", CONFIG.readPrefixes), true);
+assert.equal(pathAllowed("queue/meals/snack-typical.json", CONFIG.writePrefixes), true);
+assert.equal(pathAllowed("queue/meals/snack-typical.json", CONFIG.readPrefixes), true);
+assert.equal(pathAllowed("queue/evidence/2026-09-07-abc.jpg", CONFIG.writePrefixes), true);
+assert.equal(pathAllowed("config/meal-choices.json", CONFIG.readPrefixes), true);
+assert.equal(CONFIG.mealChoicesPath, "config/meal-choices.json");
 for (const forbidden of [
   "data/days/2026-09-01.json", "derived/web.json", "config/web.json", "gym.py",
   ".github/workflows/web-finalize.yml", "queue/uploads/x/manifest.json",
@@ -147,9 +154,14 @@ assert.deepEqual(
 const legacy = {readbacks: [{id: "a"}, {id: "b"}], outcomes: [{id: "a", state: "stale-readback-refusal"}, {id: "b", state: "confirmed"}]};
 assert.deepEqual(pendingReadbacks(legacy).map(item => item.id), ["a"]);
 
-// --- the Upload route is gone, not merely disabled ------------------------
-assert.equal(CONFIG.uploadsEnabled, false);
-// No evidence transport survives anywhere in the client.
+// --- photo evidence: the Contents API, never a branch ---------------------
+// The branch transport is what was unsafe. Deleting an `upload-*` branch does not
+// delete its objects, so the app's 30-day deletion promise could not be kept. Photos
+// now PUT straight to queue/evidence/ and no retention is promised at all.
+assert.equal(CONFIG.uploadsEnabled, true);
+assert.match(app, /queue\/evidence\//);
+assert.match(html, /id="photo-input"/);
+// The branch scheme stays dead, and so does the artifact the app used to promise.
 assert.doesNotMatch(app, /queue\/uploads/);
 assert.doesNotMatch(app, /git\/refs/);
 assert.doesNotMatch(app, /refs\/heads\//);
@@ -158,6 +170,10 @@ assert.doesNotMatch(html, /data-view="upload"/);
 assert.doesNotMatch(html, /private 30-day GitHub artifact/);
 // ...and the app no longer promises a nightly agent that was never built.
 assert.doesNotMatch(app, /nightly agent/);
+// A photo is evidence, never a value: it must not enter the submission payload.
+assert.doesNotMatch(app, /payload\.(photos|evidence)/);
+// The form has to say the part that cannot be undone.
+assert.match(html, /cannot be deleted/);
 
 // --- confirmations write; no staging controls or misleading counters ------
 assert.equal("mode" in CONFIG, false);
@@ -192,7 +208,7 @@ assert.match(app, /\$\("#weekly-form \[name=week\]"\)\.addEventListener\("change
 // --- accessibility --------------------------------------------------------
 // Real tab semantics: every tab points at a panel, and every panel exists.
 const tabs = [...html.matchAll(/role="tab"[^>]*aria-controls="([^"]+)"/g)].map(match => match[1]);
-assert.deepEqual(tabs, ["daily-form", "weekly-form", "text-form"]);
+assert.deepEqual(tabs, ["daily-form", "weekly-form"]);
 for (const panel of tabs) assert.match(html, new RegExp(`id="${panel}"[^>]*role="tabpanel"`));
 assert.match(app, /event\.key in keys/);           // arrow-key movement
 assert.match(app, /heading\.focus\(\{preventScroll:true\}\)/);  // focus follows the view
@@ -299,9 +315,21 @@ assert.match(app, /assertTopLevel\(\);\n  if \("serviceWorker" in navigator\) na
 // --- the version-2 upgrade must not destroy the version-1 token --------------
 const {
   upgradeDeviceDb, outboxOrder, isNetworkFailure, isAlreadyDelivered, isAuthFailure,
-  DB_VERSION, DEVICE_STORE, OUTBOX_STORE,
+  newerDraft, shouldPushDraft,
+  DB_VERSION, DEVICE_STORE, OUTBOX_STORE, DRAFT_STORE,
 } = await import("./queue.js");
-assert.equal(DB_VERSION, 2);
+assert.equal(DB_VERSION, 3);
+const older = {date: "2026-09-06", updated_at: "2026-09-06T20:00:00-05:00", payload: {body: {weight_kg: 89}}};
+const newer = {date: "2026-09-06", updated_at: "2026-09-06T22:00:00-05:00", payload: {body: {weight_kg: 90.4}}};
+assert.equal(newerDraft(older, newer), newer);
+assert.equal(newerDraft(newer, older), newer);
+assert.equal(shouldPushDraft(older, newer), false, "stale local must not overwrite remote");
+assert.equal(shouldPushDraft(newer, older), true);
+assert.equal(shouldPushDraft(newer, newer), false);
+assert.equal(shouldPushDraft(newer, null), true);
+assert.equal(shouldPushDraft(null, newer), false);
+assert.match(app, /if \(draft && remote && draft === remote\) \{\n    try \{ await putLocalDraft\(draft\); \}/);
+assert.match(app, /if \(!shouldPushDraft\(draft, remote\)\) continue;/);
 
 function fakeDatabase(existing) {
   const names = new Set(existing);
@@ -314,15 +342,16 @@ function fakeDatabase(existing) {
 }
 // A real version-1 database: it already holds the encrypted GitHub token in "device".
 const version1 = fakeDatabase([DEVICE_STORE]);
-assert.deepEqual(upgradeDeviceDb(version1), [OUTBOX_STORE]);
-assert.deepEqual(version1.created.map(([name]) => name), [OUTBOX_STORE]);
+assert.deepEqual(upgradeDeviceDb(version1).sort(), [OUTBOX_STORE, DRAFT_STORE].sort());
+assert.deepEqual(version1.created.map(([name]) => name).sort(), [OUTBOX_STORE, DRAFT_STORE].sort());
 assert.equal(version1.names.has(DEVICE_STORE), true);
 // Running it again changes nothing, so a repeated or interrupted upgrade is harmless.
 assert.deepEqual(upgradeDeviceDb(version1), []);
-// A fresh install gets both stores.
+// A fresh install gets every store.
 const version0 = fakeDatabase([]);
-assert.deepEqual(upgradeDeviceDb(version0).sort(), [DEVICE_STORE, OUTBOX_STORE].sort());
+assert.deepEqual(upgradeDeviceDb(version0).sort(), [DEVICE_STORE, OUTBOX_STORE, DRAFT_STORE].sort());
 assert.deepEqual(version0.created.find(([name]) => name === OUTBOX_STORE)[1], {keyPath: "id"});
+assert.deepEqual(version0.created.find(([name]) => name === DRAFT_STORE)[1], {keyPath: "date"});
 // Nothing anywhere in the upgrade path deletes a store.
 const queueSource = await readFile(new URL("./queue.js", import.meta.url), "utf8");
 assert.doesNotMatch(queueSource, /deleteObjectStore/);
@@ -379,14 +408,16 @@ assert.match(app, /"Queued on this device — it will send when you have signal\
 assert.match(app, /if \(!isNetworkFailure\(error\)\) throw error;\n    \/\/ If this throws, the form is not reset and nothing he typed is lost\.\n    await queueSubmission\(item\);/);
 // Draining needs the token, so it can never run while locked.
 assert.match(app, /if \(draining \|\| !token \|\| !deviceKey\) return;/);
-assert.match(app, /window\.addEventListener\("online",\(\)=>\{setNetworkState\(\); drainOutbox\(\)/);
-assert.match(app, /await refreshState\(\);\n    \/\/ Anything typed without signal goes out now that the token is in hand\.\n    await drainOutbox\(\);/);
+assert.match(app, /window\.addEventListener\("online",\(\)=>\{setNetworkState\(\); drainOutbox\(\)\.catch\(\(\)=>\{\}\); drainDrafts\(\)/);
+assert.match(app, /await refreshState\(\);\n    \/\/ Anything typed without signal goes out now that the token is in hand\.\n    await drainOutbox\(\);\n    await drainDrafts\(\);/);
+assert.match(app, /if \(button\.dataset\.view === "entry"\) restoreDailyDraftIfEmpty\(\);/);
+assert.match(app, /function resetDailyForm\(date\) \{\n  const form = \$\("#daily-form"\);\n  const dateInput = \$\("input\[name=date\]", form\);\n  form\.reset\(\);/);
 // 401/403 stops the drain instead of looping it.
 assert.match(app, /if \(isAuthFailure\(error\)\) \{ outboxNote = /);
 // The key lives and dies with the token.
 assert.match(app, /token = ""; deviceKey = null; ledgerState = null;/);
 // Clear this device empties the outbox and the cached plan, not just the token.
-assert.match(app, /await db\("delete"\);\n  await deviceValue\("delete", "block"\);\n  await outboxClear\(\);/);
+assert.match(app, /await db\("delete"\);\n  await deviceValue\("delete", "block"\);\n  await outboxClear\(\);\n  await draftsClear\(\);/);
 // ...and says so first, because those entries have not been sent anywhere.
 assert.match(app, /unsent entr\$\{queuedCount === 1 \? "y" : "ies"\}/);
 // The count is visible on Today and on Review.
@@ -433,8 +464,9 @@ for (const name of payloadReads) {
 // of these names may be renamed, removed or added without changing the record too.
 assert.deepEqual([...formNames].sort(), [
   "cardio_min", "cardio_speed", "cardio_type", "carbs_g", "date", "fat_g", "fiber_g",
-  "incline_pct", "kcal", "notes", "pain", "protein_g", "resting_hr", "session_minutes",
-  "session_status", "sleep_hours", "steps", "unplanned_eating", "water_ml", "weight_kg",
+  "incline_pct", "kcal", "notes", "pain", "pasted_text", "protein_g", "resting_hr",
+  "session_minutes", "session_status", "sleep_hours", "steps", "unplanned_eating",
+  "water_ml", "weight_kg",
 ].sort());
 
 // The plan never fills the session status on his behalf: that value rode along with
@@ -455,19 +487,22 @@ for (const name of ["weight_kg", "steps", "kcal"]) {
   assert.match(leadFields, new RegExp(`name="${name}"`), `${name} must be visible before any disclosure`);
 }
 // Nutrition detail, Cardio and the Session extras are disclosed, natively.
-for (const id of ["daily-nutrition", "daily-cardio", "daily-session", "daily-recovery", "daily-notes"]) {
+for (const id of ["daily-paste", "daily-photos", "daily-meals", "daily-nutrition", "daily-cardio", "daily-session", "daily-recovery", "daily-notes"]) {
   assert.match(dailyForm, new RegExp(`<details class="disclosure" id="${id}">`));
 }
-assert.equal((dailyForm.match(/<summary>/g) || []).length, 5);
+assert.equal((dailyForm.match(/<summary>/g) || []).length, 8);
+// Writing the session and photographing it sit together, right above Session itself.
+assert.ok(dailyForm.indexOf('id="daily-paste"') < dailyForm.indexOf('id="daily-photos"'));
+assert.ok(dailyForm.indexOf('id="daily-photos"') < dailyForm.indexOf('id="daily-session"'));
 // The exercise rows live inside the session disclosure.
 assert.ok(dailyForm.indexOf('id="daily-session"') < dailyForm.indexOf('id="exercise-fields"'));
 
 // A collapsed section may not hide an entered value: every summary carries a live count.
-assert.equal((dailyForm.match(/class="disclosure-count" hidden/g) || []).length, 5);
+assert.equal((dailyForm.match(/class="disclosure-count" hidden/g) || []).length, 8);
 assert.match(app, /function updateDisclosureCounts\(\)/);
 assert.match(app, /for \(const eventName of \["input","change"\]\) \$\("#daily-form"\)\.addEventListener\(eventName, updateDisclosureCounts\)/);
 // reset() fires no input event, so the counts are recomputed explicitly after a submit.
-assert.match(app, /if\(dateInput\)dateInput\.value=chicagoDate\(\);\n  \/\/ reset\(\) fires no input event[^\n]*\n  updateDisclosureCounts\(\);/);
+assert.match(app, /if\(dateInput\)dateInput\.value=chicagoDate\(\);\n  if \(form\.id === "daily-form"\) \{ chosenMealIds = \[\]; renderMealChips\(\); \}\n  \/\/ reset\(\) fires no input event[^\n]*\n  updateDisclosureCounts\(\);/);
 // openDisclosure only ever opens, so a section holding a value is never shut on him.
 assert.match(app, /function openDisclosure\(details, wanted\) \{\n  if \(details && \(wanted \|\| countEntered\(details\)\)\) details\.open = true;\n\}/);
 // The cardio type ships with a default, which must not read as an entered value.
@@ -497,6 +532,41 @@ assert.doesNotMatch(app, /JSON\.stringify\(readback/);
 // finalizes.
 assert.match(app, /if \(card\.dataset\.renderedHash\) marker\.rendered_sha256 = card\.dataset\.renderedHash;/);
 assert.match(app, /readback_sha256:card\.dataset\.hash/);   // unchanged meaning
+
+assert.match(html, /id="save-draft"/);
+assert.doesNotMatch(html, /id="text-form"|id="tab-text"/);
+assert.match(app, /async function upsertJson/);
+assert.match(app, /queue\/drafts\/daily-/);
+assert.match(app, /class="sets"/);
+assert.match(app, /function fmtNum/);
+// The flashcard deck is the landing page. Four cards, and the agent's prose is one of
+// them — the Lookback card was renamed, not dropped, so match the field it reads.
+assert.match(app, /brief\.lookback\?\.body/);
+assert.match(app, /brief\.review\?\.body/);
+for (const card of ["doNextCard", "standingCard", "adherenceCard", "verdictCard"]) {
+  assert.match(app, new RegExp(`function ${card}\\(`));
+}
+assert.match(app, /class="deck"/);
+// Paging is native scroll-snap; a carousel dependency would be the app's only one.
+assert.match(css, /scroll-snap-type:x mandatory/);
+assert.match(css, /\.deck-card\{scroll-snap-align:center/);
+// Needs you moved off Today and onto Review, where the awaiting-you count already is.
+assert.ok(app.indexOf('function renderToday') < app.indexOf('needsCard'));
+assert.match(app, /const needsCard = /);
+assert.doesNotMatch(app.slice(app.indexOf("function renderToday"), app.indexOf("async function renderReview")), /needs_you/);
+// A rate needs its sign and unit, and a raw float must never reach a tile.
+assert.match(app, /kg\/wk/);
+assert.match(app, /fmtNum\(Math\.abs\(trend\), 2\)/);
+assert.match(app, /fmtNum\(standing\.weight_avg_7d_kg, 2\)/);
+assert.match(css, /@media\(max-width:760px\)\{\.dashboard-grid\{grid-template-columns:1fr\}/);
+assert.match(html, /id="meal-chips"/);
+assert.match(html, /id="add-meal"/);
+assert.match(app, /chosen_meals/);
+assert.match(app, /function applyMealDelta/);
+assert.match(app, /queue\/meals\//);
+assert.match(app, /\$\("#add-meal"\)\.addEventListener/);
+assert.doesNotMatch(app, /nutrition\.json/);
+assert.doesNotMatch(html, />550</);
 
 // gym.py accepts the field, and checks it when it is there.
 const gym = await readFile(new URL("../gym.py", import.meta.url), "utf8");

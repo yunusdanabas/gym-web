@@ -65,7 +65,7 @@ button[type="submit"],#connection-test{border:0;border-radius:12px;background:va
 .review-card header{display:flex;justify-content:space-between;gap:12px}.review-card .state{font:700 .72rem "IBM Plex Mono",monospace;color:var(--rust);text-transform:uppercase}.readback{display:grid;gap:0;margin:14px 0}.readback-row{display:grid;grid-template-columns:minmax(140px,1fr) 1.2fr auto;gap:10px;padding:10px 0;border-top:1px solid var(--line);align-items:start}.readback-row code{font-family:"IBM Plex Mono",monospace;white-space:pre-wrap;overflow-wrap:anywhere}.unread{color:var(--muted);font-style:italic}.source{color:var(--muted);font-size:.76rem}.review-actions{display:flex;gap:8px;flex-wrap:wrap}.review-actions button{border:0;border-radius:11px;padding:11px 15px;font-weight:700}.confirm{background:var(--sage);color:var(--button-ink)}.correct{background:var(--sage-soft);color:var(--ink)}
 .bottom-nav{position:fixed;z-index:8;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;padding:8px max(8px,calc((100vw - 720px)/2)) calc(8px + env(safe-area-inset-bottom));background:color-mix(in srgb,var(--paper) 92%,transparent);backdrop-filter:blur(18px);border-top:1px solid var(--line)}
 .nav-item{flex:1;min-width:0;padding:11px 5px;font-size:.75rem;white-space:nowrap;min-height:48px}
-@media(max-width:760px){.dashboard-grid,.field-grid{grid-template-columns:1fr 1fr}.exercise-row{grid-template-columns:repeat(3,minmax(0,1fr))}.exercise-name{grid-column:1/-1}.topbar{padding:14px 16px}.shell{padding-top:24px}.view-head{align-items:center}.topbar .kicker{display:none}}
+@media(max-width:760px){.dashboard-grid{grid-template-columns:1fr}.field-grid{grid-template-columns:1fr 1fr}.exercise-row{grid-template-columns:repeat(3,minmax(0,1fr))}.exercise-name{grid-column:1/-1}.topbar{padding:14px 16px}.shell{padding-top:24px}.view-head{align-items:center}.topbar .kicker{display:none}}
 @media(max-width:480px){.field-grid,.stats{grid-template-columns:1fr 1fr}.readback-row{grid-template-columns:1fr auto}.readback-row code{grid-column:1/-1}.nav-item{font-size:.7rem}.topbar h1{font-size:1.1rem}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 
@@ -99,10 +99,17 @@ button[type="submit"],#connection-test{border:0;border-radius:12px;background:va
 .load-list{list-style:none;padding:0;margin:0}
 .load-list li{display:flex;align-items:baseline;gap:14px;padding:12px 0;border-top:1px solid var(--line)}
 .load-list li:first-child{border-top:0}
-.load-list .load{flex:0 0 auto;min-width:4.4em;font:800 1.6rem/1 "IBM Plex Mono",monospace;color:var(--ink)}
-.load-list .load i{font:600 .7rem "IBM Plex Mono",monospace;font-style:normal;color:var(--muted);margin-left:3px}
+.load-list .sets{flex:0 0 auto;min-width:4.8em;font:800 1.35rem/1 "IBM Plex Mono",monospace;color:var(--ink)}
+.load-list .sets i{font:600 .7rem "IBM Plex Mono",monospace;font-style:normal;color:var(--muted);margin-left:3px}
 .load-list strong{display:block;font-size:.98rem}
 .load-list small{display:block;color:var(--muted);font-size:.76rem}
+.lookback{white-space:pre-wrap;line-height:1.5;margin:0}
+.chip-row{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
+.chip{border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:999px;padding:8px 12px;min-height:44px;font-weight:700;text-align:left}
+.chip small{display:block;font:400 .72rem "IBM Plex Mono",monospace;color:var(--muted)}
+.chip.active{background:var(--sage-soft);border-color:var(--sage)}
+.form-actions{display:flex;gap:9px;flex-wrap:wrap}
+.form-actions button{flex:1;min-height:48px}
 .stat abbr{text-decoration:none;border-bottom:1px dotted currentColor}
 
 /* Focus must be visible: showView() moves it to the heading of the new view. */
@@ -114,3 +121,31 @@ button[type="submit"],#connection-test{border:0;border-radius:12px;background:va
   html{scroll-behavior:auto}
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+
+/* The flashcard deck on Today. Native scroll-snap pages it one card at a time; a
+   carousel library would be the only dependency in this app, and CSS already does it.
+   Above the phone breakpoint the deck stops being a strip and becomes a normal grid,
+   because a wide screen has room to show all four at once. */
+.deck{grid-column:1/-1;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:16px}
+.deck-card{scroll-snap-align:center;min-width:0}
+.deck-card .hero-line{margin-bottom:2px}
+.deck-card .stats{margin-top:14px}
+.deck-card .prose{max-height:46vh;overflow-y:auto}
+.kicker.sub{margin-top:14px;color:var(--muted)}
+.prose>.kicker.sub:first-child{margin-top:0}
+@media(max-width:760px){
+  /* One card per screen, swiped. `overflow-x` scrolls the strip, never the page. */
+  .deck{grid-auto-columns:88%;overflow-x:auto;scroll-snap-type:x mandatory;
+    scroll-padding:0 18px;padding-bottom:4px;margin:0 -18px;padding-left:18px;padding-right:18px;
+    scrollbar-width:none}
+  .deck::-webkit-scrollbar{display:none}
+}
+/* Ticked-off exercises on Do next. The mark is aria-hidden: the row's own text still
+   reads correctly, and a screen reader should not announce a bullet as "middle dot". */
+.load-list.ticks li{gap:10px}
+.load-list .tick{flex:0 0 1.1em;font:800 1.1rem/1 "IBM Plex Mono",monospace;color:var(--muted)}
+.load-list li.logged .tick{color:var(--sage)}
+.load-list li.logged strong{text-decoration:line-through;text-decoration-color:var(--line)}
+.spark{display:block;width:100%;height:56px;margin:14px 0 2px;overflow:visible}
+.spark polyline{fill:none;stroke:var(--sage);stroke-width:2;vector-effect:non-scaling-stroke;
+  stroke-linejoin:round;stroke-linecap:round}

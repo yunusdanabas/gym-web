@@ -2,17 +2,25 @@
 export const CONFIG = {
   "blockPath": "config/block.json",
   "mainBranch": "main",
+  "mealChoicesPath": "config/meal-choices.json",
   "owner": "yunusdanabas",
   "readPrefixes": [
     "config/block.json",
+    "config/meal-choices.json",
     "derived/web.json",
+    "queue/drafts/",
+    "queue/evidence/",
+    "queue/meals/",
     "queue/readbacks/"
   ],
   "repo": "gym-ledger-inbox",
   "statePath": "derived/web.json",
-  "uploadsEnabled": false,
+  "uploadsEnabled": true,
   "writePrefixes": [
     "queue/confirmations/",
+    "queue/drafts/",
+    "queue/evidence/",
+    "queue/meals/",
     "queue/submissions/"
   ]
 };

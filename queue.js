@@ -25,9 +25,10 @@ export function pendingReadbacks(state) {
 // with the device key and held in IndexedDB until a drain can send it.
 
 export const DB_NAME = "gym-ledger";
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DEVICE_STORE = "device";
 export const OUTBOX_STORE = "outbox";
+export const DRAFT_STORE = "drafts";
 
 // Additive, and only additive. Version 1 held the encrypted GitHub token under
 // "device"; an upgrade that dropped or recreated that store would throw the token away
@@ -39,6 +40,7 @@ export function upgradeDeviceDb(database) {
   const created = [];
   if (!names.contains(DEVICE_STORE)) { database.createObjectStore(DEVICE_STORE); created.push(DEVICE_STORE); }
   if (!names.contains(OUTBOX_STORE)) { database.createObjectStore(OUTBOX_STORE, {keyPath:"id"}); created.push(OUTBOX_STORE); }
+  if (!names.contains(DRAFT_STORE)) { database.createObjectStore(DRAFT_STORE, {keyPath:"date"}); created.push(DRAFT_STORE); }
   return created;
 }
 
@@ -73,4 +75,18 @@ export function isAlreadyDelivered(error) {
 // say so rather than walking the whole queue into the same wall.
 export function isAuthFailure(error) {
   return Boolean(error) && (error.status === 401 || error.status === 403);
+}
+
+export function newerDraft(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  return String(left.updated_at || "") >= String(right.updated_at || "") ? left : right;
+}
+
+// Push only when this device has a strictly newer updated_at. An older or equal
+// local copy must not overwrite the inbox.
+export function shouldPushDraft(local, remote) {
+  if (!local) return false;
+  if (!remote) return true;
+  return String(local.updated_at || "") > String(remote.updated_at || "");
 }

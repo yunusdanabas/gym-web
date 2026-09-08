@@ -62,7 +62,6 @@
         <div class="segmented" role="tablist" aria-label="Entry type">
           <button class="segment active" id="tab-daily" data-entry-tab="daily" role="tab" aria-selected="true" aria-controls="daily-form" type="button">Daily</button>
           <button class="segment" id="tab-weekly" data-entry-tab="weekly" role="tab" aria-selected="false" aria-controls="weekly-form" tabindex="-1" type="button">Weekly</button>
-          <button class="segment" id="tab-text" data-entry-tab="text" role="tab" aria-selected="false" aria-controls="text-form" tabindex="-1" type="button">Paste text</button>
         </div>
 
         <form id="daily-form" class="form-card stack" role="tabpanel" aria-labelledby="tab-daily" tabindex="0">
@@ -75,6 +74,22 @@
             <label>Steps<input name="steps" type="number" min="0" max="60000" step="1" inputmode="numeric"></label>
             <label>Calories <small>kcal</small><input name="kcal" type="number" min="500" max="6000" step="1" inputmode="numeric"></label>
           </div>
+          <p class="hint">Screenshots stay on the laptop with <code>./gym ingest</code>. Paste FitNotes, EatBetter, or shorthand here, then Save or Send for readback.</p>
+
+          <details class="disclosure" id="daily-meals">
+            <summary><span class="disclosure-title">Meals</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
+            <p class="hint">Pick a meal only after you stored exact macros. The plan bands are not numbers.</p>
+            <div id="meal-chips" class="chip-row"></div>
+            <div class="field-grid">
+              <label>New meal name<input id="meal-name" type="text" autocomplete="off"></label>
+              <label>Items<input id="meal-items" type="text" autocomplete="off"></label>
+              <label>kcal<input id="meal-kcal" type="number" min="0" max="6000" step="1" inputmode="numeric"></label>
+              <label>Protein <small>g</small><input id="meal-protein" type="number" min="0" step="1" inputmode="numeric"></label>
+              <label>Carbs <small>g</small><input id="meal-carbs" type="number" min="0" step="1" inputmode="numeric"></label>
+              <label>Fat <small>g</small><input id="meal-fat" type="number" min="0" step="1" inputmode="numeric"></label>
+            </div>
+            <button type="button" id="add-meal" class="quiet">Add meal</button>
+          </details>
 
           <details class="disclosure" id="daily-nutrition">
             <summary><span class="disclosure-title">Nutrition detail</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
@@ -94,6 +109,19 @@
               <label>Sleep <small>hours</small><input name="sleep_hours" type="number" min="0" max="14" step="0.1" inputmode="decimal"></label>
               <label>Resting HR <small>bpm</small><input name="resting_hr" type="number" min="30" max="120" step="1" inputmode="numeric"></label>
             </div>
+          </details>
+
+          <details class="disclosure" id="daily-paste">
+            <summary><span class="disclosure-title">Write the session</span><span class="disclosure-note">paste the app export, or type shorthand</span><span class="disclosure-count" hidden></span></summary>
+            <p class="hint">Paste a FitNotes or EatBetter export whole — exercise headings and one set per line are read as written. A name the plan does not carry is reported back, never dropped.</p>
+            <label>Session text<textarea name="pasted_text" rows="9" placeholder="** Machine Chest Press **&#10;- 55.0 lbs x 12 reps&#10;- 55.0 lbs x 10 reps&#10;&#10;or shorthand:&#10;w 91.0 / 2180 172 208 61 / steps 7412 / chest 55 12,11,10,10"></textarea></label>
+          </details>
+
+          <details class="disclosure" id="daily-photos">
+            <summary><span class="disclosure-title">Photos</span><span class="disclosure-note">evidence for the laptop</span><span class="disclosure-count" hidden></span></summary>
+            <p class="hint">Screenshots and scale photos for this date. They are read on the laptop with <code>./gym ingest</code> — no number reaches the record until you confirm a read-back. They stay in the private inbox's history and cannot be deleted afterwards.</p>
+            <label>Add photos<input id="photo-input" type="file" accept="image/*" multiple></label>
+            <ul id="photo-list" class="clean-list"></ul>
           </details>
 
           <details class="disclosure" id="daily-session">
@@ -121,7 +149,11 @@
             <label>Anything worth recording<textarea name="notes" rows="3"></textarea></label>
           </details>
 
-          <button type="submit">Send for readback</button><p class="status" role="status"></p>
+          <div class="form-actions">
+            <button type="button" id="save-draft" class="quiet">Save</button>
+            <button type="submit">Send for readback</button>
+          </div>
+          <p class="status" role="status"></p>
         </form>
 
         <form id="weekly-form" class="form-card stack" role="tabpanel" aria-labelledby="tab-weekly" tabindex="0" hidden>
@@ -139,12 +171,6 @@
             <label>Alcohol units<input name="alcohol_units" type="number" min="0" step="0.1" required></label>
           </div><label>Notes<textarea name="notes" rows="3"></textarea></label>
           <button type="submit">Send weekly review</button><p class="status" role="status"></p>
-        </form>
-
-        <form id="text-form" class="form-card stack" role="tabpanel" aria-labelledby="tab-text" tabindex="0" hidden>
-          <label>Date<input name="date" type="date" required></label>
-          <label>Pasted app text or shorthand<textarea name="text" rows="10" placeholder="w 91.0 / 2180 172 208 61 / steps 7412" required></textarea></label>
-          <button type="submit">Parse for readback</button><p class="status" role="status"></p>
         </form>
       </section>
 
