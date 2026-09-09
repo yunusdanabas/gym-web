@@ -755,7 +755,7 @@ async function renderReview() {
     list.innerHTML = `<article class="card"><p class="muted">Nothing is waiting for confirmation.</p></article>${needsCard}`;
     return;
   }
-  list.innerHTML = pending.map(item => `<article class="card review-card" data-readback-path="${esc(item.path)}" data-id="${esc(item.id)}" data-kind="${esc(item.kind)}" data-target="${esc(item.date || item.week)}" data-hash="${esc(item.readback_sha256)}"><header><div><p class="kicker">${esc(item.date || item.week)}</p><h3>${esc(item.kind)} entry</h3></div><span class="state">${esc(item.state)}</span></header><div class="readback"><p class="muted">Open review to load the complete field-by-field readback.</p></div><div class="review-actions"><button class="correct" type="button">Open review</button></div></article>`).join("") + needsCard;
+  list.innerHTML = pending.map(item => `<article class="card review-card" data-readback-path="${esc(item.path)}" data-id="${esc(item.id)}" data-kind="${esc(item.kind)}" data-target="${esc(item.date || item.week)}" data-hash="${esc(item.readback_sha256)}"><header><div><p class="kicker">${esc(item.date || item.week)}</p><h3>${esc(item.kind)} entry</h3></div><span class="state">${esc(item.state)}</span></header><div class="readback"><p class="muted">Open review to load the complete field-by-field readback.</p></div><div class="review-actions"><button class="correct" type="button">Open review</button><button class="dismiss" type="button">Delete request</button></div></article>`).join("") + needsCard;
 }
 
 async function openReadback(card) {
@@ -770,7 +770,9 @@ async function openReadback(card) {
   const unread = readback.fields.filter(row => row.status === "unread").length;
   const summary = `<p class="hint">${unread ? `${esc(unread)} field${unread === 1 ? "" : "s"} unread — they stay absent, they are not guessed.` : "Every field was read."}</p>`;
   $(".readback", card).innerHTML = rows + notices + summary;
-  $(".review-actions", card).innerHTML = readback.state === "ready" ? `<button class="confirm" type="button">Confirm readback</button><button class="correct" type="button">Correct</button>` : `<button class="correct" type="button">Correct</button>`;
+  $(".review-actions", card).innerHTML = readback.state === "ready"
+    ? `<button class="confirm" type="button">Confirm readback</button><button class="correct" type="button">Correct</button><button class="dismiss" type="button">Delete request</button>`
+    : `<button class="correct" type="button">Correct</button><button class="dismiss" type="button">Delete request</button>`;
 }
 
 function renderHistory() {
@@ -1104,6 +1106,7 @@ $("#photo-input").addEventListener("change", async event => {
 
 $("#review-list").addEventListener("click", async event => {
   const card=event.target.closest(".review-card"); if (!card) return;
+  const button = event.target.closest("button");
   try {
     if (event.target.matches(".confirm")) {
       assertTopLevel();
@@ -1114,6 +1117,15 @@ $("#review-list").addEventListener("click", async event => {
       await putJson(`queue/confirmations/${marker.id}-${marker.readback_sha256.slice(0,16)}.json`,marker,`web: confirm ${marker.id}`);
       event.target.textContent="Confirmation sent · processing";
       // Without this the card sat on "processing" until a manual Refresh.
+      await refreshState();
+    } else if (event.target.matches(".dismiss")) {
+      assertTopLevel();
+      const target = card.dataset.target || "this";
+      if (!window.confirm(`Delete the ${target} request from Review? This does not change a confirmed day.`)) return;
+      event.target.disabled=true; event.target.textContent="Deleting…";
+      const marker={schema:1,interface:"web_dismissal_v1",id:card.dataset.id,readback_sha256:card.dataset.hash,dismissed_at:chicagoTimestamp(),client_id:localStorage.getItem("gym-client-id")};
+      await putJson(`queue/dismissals/${marker.id}-${String(marker.readback_sha256).slice(0,16)}.json`,marker,`web: dismiss ${marker.id}`);
+      event.target.textContent="Deleted · processing";
       await refreshState();
     } else if (event.target.matches(".correct") && $(".readback-row",card)) {
       const target=card.dataset.target, kind=card.dataset.kind;
@@ -1130,8 +1142,11 @@ $("#review-list").addEventListener("click", async event => {
   } catch (error) {
     // Appended, never substituted: replacing the card's contents wiped the readback he
     // was in the middle of reading and left a disabled button behind.
-    const button = event.target.closest("button");
-    if (button) { button.disabled = false; button.textContent = button.matches(".confirm") ? "Confirm readback" : button.textContent; }
+    if (button) {
+      button.disabled = false;
+      if (button.matches(".confirm")) button.textContent = "Confirm readback";
+      if (button.matches(".dismiss")) button.textContent = "Delete request";
+    }
     const notice = document.createElement("p");
     notice.className = "status error";
     notice.textContent = error.message;

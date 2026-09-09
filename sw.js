@@ -19,7 +19,7 @@
 // never reach him — he would be running an old client against a newer queue contract and
 // have no way to tell. webapp/test.mjs recomputes this from the files and fails until it
 // matches, and changing it here is also what makes the browser install the new worker.
-const SHELL_REVISION = "b93e7f770c93285c";
+const SHELL_REVISION = "e9152690f46d6405";
 const CACHE = `gym-ledger-shell-${SHELL_REVISION}`;
 
 const SHELL = [

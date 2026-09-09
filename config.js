@@ -18,6 +18,7 @@ export const CONFIG = {
   "uploadsEnabled": true,
   "writePrefixes": [
     "queue/confirmations/",
+    "queue/dismissals/",
     "queue/drafts/",
     "queue/evidence/",
     "queue/meals/",

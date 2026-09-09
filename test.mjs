@@ -111,10 +111,11 @@ clearCredentialFields(resetlessDoc);
 assert.deepEqual(resetlessDoc.inputs.map(input => input.value), ["", ""]);
 
 // --- finding 1: the browser credential may only touch the inbox ------------
-assert.deepEqual(CONFIG.writePrefixes, ["queue/confirmations/", "queue/drafts/", "queue/evidence/", "queue/meals/", "queue/submissions/"]);
+assert.deepEqual(CONFIG.writePrefixes, ["queue/confirmations/", "queue/dismissals/", "queue/drafts/", "queue/evidence/", "queue/meals/", "queue/submissions/"]);
 for (const prefix of CONFIG.writePrefixes) assert.equal(prefix.startsWith("queue/"), true);
 assert.equal(pathAllowed("queue/submissions/abc.json", CONFIG.writePrefixes), true);
 assert.equal(pathAllowed("queue/confirmations/abc.json", CONFIG.writePrefixes), true);
+assert.equal(pathAllowed("queue/dismissals/abc.json", CONFIG.writePrefixes), true);
 assert.equal(pathAllowed("queue/drafts/daily-2026-09-07.json", CONFIG.writePrefixes), true);
 assert.equal(pathAllowed("queue/drafts/daily-2026-09-07.json", CONFIG.readPrefixes), true);
 assert.equal(pathAllowed("queue/meals/snack-typical.json", CONFIG.writePrefixes), true);
@@ -159,6 +160,18 @@ assert.deepEqual(
 // Older state files without `resolved` fall back to the shared terminal-state list.
 const legacy = {readbacks: [{id: "a"}, {id: "b"}], outcomes: [{id: "a", state: "stale-readback-refusal"}, {id: "b", state: "confirmed"}]};
 assert.deepEqual(pendingReadbacks(legacy).map(item => item.id), ["a"]);
+assert.deepEqual(
+  pendingReadbacks({
+    terminal_outcome_states: [...TERMINAL_OUTCOME_STATES, "dismissed"],
+    readbacks: [{id: "gone", resolved: true}, {id: "open", resolved: false}],
+    outcomes: [{id: "gone", state: "dismissed"}],
+  }).map(item => item.id),
+  ["open"],
+);
+assert.match(app, /queue\/dismissals/);
+assert.match(app, /matches\("\.dismiss"\)/);
+assert.match(app, /web_dismissal_v1/);
+assert.doesNotMatch(app, /queue\/evidence\/.*DELETE|method:"DELETE".*evidence/);
 
 // --- photo evidence: the Contents API, never a branch ---------------------
 // The branch transport is what was unsafe. Deleting an `upload-*` branch does not
@@ -188,7 +201,7 @@ assert.doesNotMatch(html, /mode-pill|mode-banner|staging/i);
 assert.doesNotMatch(app, /applyMode|CONFIG\.mode|ledgerState\??\.mode|cutover_date|staging|they read zero/i);
 assert.doesNotMatch(css, /mode-pill|mode-banner|staging/i);
 assert.match(css, /\.banner\{/); // The offline outbox still uses the shared notice style.
-assert.deepEqual(TERMINAL_OUTCOME_STATES, ["confirmed", "re-upload-required"]);
+assert.deepEqual(TERMINAL_OUTCOME_STATES, ["confirmed", "re-upload-required", "dismissed"]);
 
 // --- a confirmation says what is unread before it is given -----------------
 assert.match(app, /field\$\{unread === 1 \? "" : "s"\} unread/);
@@ -246,7 +259,8 @@ for (const background of ["bg", "sage-soft", "paper"]) {
 assert.doesNotMatch(html, /frame-ancestors/);
 assert.match(html, /data-frame-check|guard\.js/);
 for (const guarded of [/assertTopLevel\(\);\n  const \{value: readback, bytes\} = await getJsonFile/,
-                       /if \(event\.target\.matches\("\.confirm"\)\) \{\n      assertTopLevel\(\);/]) {
+                       /if \(event\.target\.matches\("\.confirm"\)\) \{\n      assertTopLevel\(\);/,
+                       /if \(event\.target\.matches\("\.dismiss"\)\) \{\n      assertTopLevel\(\);/]) {
   assert.match(app, guarded);
 }
 // --- the browser chrome follows the viewer's theme -------------------------

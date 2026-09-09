@@ -2,7 +2,7 @@
 
 // Mirrors gym.py TERMINAL_OUTCOME_STATES. derived/web.json carries the authoritative
 // copy in `terminal_outcome_states`; this is only the fallback for older state files.
-export const TERMINAL_OUTCOME_STATES = ["confirmed", "re-upload-required"];
+export const TERMINAL_OUTCOME_STATES = ["confirmed", "re-upload-required", "dismissed"];
 
 // A readback is finished only when its submission reached a terminal outcome.
 // `stale-readback-refusal` and `validation-failed` are retryable: gym.py prepares a
