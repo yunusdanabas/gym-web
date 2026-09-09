@@ -3,12 +3,14 @@ import {readFile} from "node:fs/promises";
 import {webcrypto} from "node:crypto";
 
 Object.defineProperty(globalThis, "crypto", {value:webcrypto});
-const {bytesToB64, encryptToken, decryptToken} = await import("./crypto.js");
+const {bytesToB64, generateDeviceKey, sealWithKey, openWithKey} = await import("./crypto.js");
+const {clockParts, clockToHours, clockToMinutes, hoursToClock, minutesToClock} = await import("./clock.js");
 
-const saved = await encryptToken("test-token-value", "a-long-test-passphrase");
-assert.equal(saved.iterations, 600000);
-assert.equal(await decryptToken(saved, "a-long-test-passphrase"), "test-token-value");
-await assert.rejects(() => decryptToken(saved, "wrong-passphrase"));
+const deviceKey = await generateDeviceKey();
+const sealedToken = await sealWithKey(deviceKey, "test-token-value");
+assert.equal(await openWithKey(deviceKey, sealedToken), "test-token-value");
+const otherKey = await generateDeviceKey();
+await assert.rejects(() => openWithKey(otherKey, sealedToken));
 const large = new Uint8Array(200000).map((_, index) => index % 251);
 assert.equal(Buffer.from(bytesToB64(large), "base64").length, large.length);
 
@@ -17,7 +19,11 @@ const app = await readFile(new URL("./app.js", import.meta.url), "utf8");
 assert.match(html, /noindex,nofollow/);
 assert.match(html, /connect-src https:\/\/api\.github\.com/);
 assert.doesNotMatch(html, /https:\/\/(?!api\.github\.com)/);
-assert.match(app, /LOCK_AFTER_MS = 30 \* 60 \* 1000/);
+assert.doesNotMatch(app, /LOCK_AFTER_MS/);
+assert.doesNotMatch(html, /id="unlock-form"|id="lock-button"|name="passphrase"/);
+assert.match(app, /generateDeviceKey/);
+assert.match(app, /schema:2/);
+assert.match(app, /const key = await deviceValue\("get", "device-key"\) \|\| await generateDeviceKey\(\);/);
 assert.match(app, /queue\/submissions/);
 assert.match(app, /queue\/confirmations/);
 assert.match(app, /readback_sha256\.slice\(0,16\)/);
@@ -77,21 +83,21 @@ assert.equal((app.match(/assertTopLevel\(\)/g) || []).length >= 5, true);
 
 // --- finding 4: no credential may survive in the DOM -----------------------
 function fakeInput(value) { return {value, reset: false}; }
-const setupInputs = [fakeInput("github_pat_secret"), fakeInput("passphrase"), fakeInput("passphrase")];
+const setupInputs = [fakeInput("github_pat_secret")];
 clearSensitiveInputs(setupInputs);
-assert.deepEqual(setupInputs.map(input => input.value), ["", "", ""]);
+assert.deepEqual(setupInputs.map(input => input.value), [""]);
 
 const credentialDoc = {
-  inputs: [fakeInput("github_pat_secret"), fakeInput("a-long-passphrase"), fakeInput("a-long-passphrase")],
+  inputs: [fakeInput("github_pat_secret")],
   resets: [],
   querySelectorAll() { return this.inputs; },
   getElementById(id) { const doc = this; return {reset() { doc.resets.push(id); }}; },
 };
 clearCredentialFields(credentialDoc);
-assert.deepEqual(credentialDoc.inputs.map(input => input.value), ["", "", ""]);
-assert.deepEqual(credentialDoc.resets.sort(), ["setup-form", "unlock-form"]);
-// Clearing happens after setup (success and failure), after unlock, on lock and on gate init.
-assert.equal((app.match(/clearCredentialFields\(document\)/g) || []).length >= 5, true);
+assert.deepEqual(credentialDoc.inputs.map(input => input.value), [""]);
+assert.deepEqual(credentialDoc.resets.sort(), ["setup-form"]);
+// Clearing happens after setup (success and failure), on lock and on gate init.
+assert.equal((app.match(/clearCredentialFields\(document\)/g) || []).length >= 3, true);
 assert.match(app, /\}\n  finally \{ clearCredentialFields\(document\); \}\n\}\);/);
 // The old single-field clear must be gone.
 assert.doesNotMatch(app, /\$\("#unlock-form input"\)\.value = ""/);
@@ -213,7 +219,7 @@ for (const panel of tabs) assert.match(html, new RegExp(`id="${panel}"[^>]*role=
 assert.match(app, /event\.key in keys/);           // arrow-key movement
 assert.match(app, /heading\.focus\(\{preventScroll:true\}\)/);  // focus follows the view
 assert.match(app, /prefersReducedMotion\(\) \? "auto" : "smooth"/);
-assert.match(app, /visibilityState==="hidden"&&token\)lock\(\)/);  // lock when backgrounded
+assert.doesNotMatch(app, /visibilityState==="hidden"/);
 // Tap targets reach the 44px floor.
 assert.match(css, /\.segment,\.nav-item,\.quiet\{[^}]*min-height:44px/);
 assert.match(css, /\.nav-item\{[^}]*min-height:48px/);
@@ -289,7 +295,7 @@ for (const asset of shell) {
   assert.equal(sw.match(/const SHELL_REVISION = "([0-9a-f]+)"/)[1], revision,
     `the app shell changed: set SHELL_REVISION in webapp/sw.js to "${revision}", or installed phones will keep serving the old client`);
 }
-for (const required of ["./index.html", "./app.js", "./styles.css", "./crypto.js", "./guard.js",
+for (const required of ["./index.html", "./app.js", "./clock.js", "./styles.css", "./crypto.js", "./guard.js",
                         "./queue.js", "./config.js", "./manifest.webmanifest"]) {
   assert.ok(shell.includes(required), `${required} is missing from the cached shell`);
 }
@@ -388,18 +394,14 @@ assert.deepEqual(
 );
 
 // --- a queued submission is sealed, not left in the clear --------------------
-const {deriveDeviceKey, sealWithKey, openWithKey, sealToken} = await import("./crypto.js");
-const device = await sealToken("github_pat_secret", "a-long-test-passphrase");
-assert.equal(await decryptToken(device.record, "a-long-test-passphrase"), "github_pat_secret");
-const outboxKey = await deriveDeviceKey(device.record, "a-long-test-passphrase");
+const outboxKey = await generateDeviceKey();
 const sealedEntry = await sealWithKey(outboxKey, JSON.stringify({payload: {body: {weight_kg: 91.4}}}));
 // Nothing readable reaches storage: not the field names, not the values.
 const rawEntry = Buffer.from(sealedEntry.ciphertext, "base64");
 assert.equal(rawEntry.includes(Buffer.from("weight_kg")), false);
 assert.equal(rawEntry.includes(Buffer.from("91.4")), false);
 assert.equal(JSON.parse(await openWithKey(outboxKey, sealedEntry)).payload.body.weight_kg, 91.4);
-// A different passphrase cannot open it.
-const wrongKey = await deriveDeviceKey(device.record, "a-different-passphrase");
+const wrongKey = await generateDeviceKey();
 await assert.rejects(() => openWithKey(wrongKey, sealedEntry));
 
 // --- the queue is wired the way the contract requires ------------------------
@@ -417,7 +419,8 @@ assert.match(app, /if \(isAuthFailure\(error\)\) \{ outboxNote = /);
 // The key lives and dies with the token.
 assert.match(app, /token = ""; deviceKey = null; ledgerState = null;/);
 // Clear this device empties the outbox and the cached plan, not just the token.
-assert.match(app, /await db\("delete"\);\n  await deviceValue\("delete", "block"\);\n  await outboxClear\(\);\n  await draftsClear\(\);/);
+assert.match(app, /await db\("delete"\);\n  await deviceValue\("delete", "device-key"\);\n  await deviceValue\("delete", "block"\);\n  await outboxClear\(\);\n  await draftsClear\(\);/);
+assert.match(app, /from "\.\/clock\.js"/);
 // ...and says so first, because those entries have not been sent anywhere.
 assert.match(app, /unsent entr\$\{queuedCount === 1 \? "y" : "ies"\}/);
 // The count is visible on Today and on Review.
@@ -429,8 +432,8 @@ assert.match(html, /id="outbox-banner"/);
 // event.currentTarget is null once the event has finished dispatching, so an async
 // handler that reads it after an await gets null. That is how unlock came to throw a
 // TypeError on every attempt and report it as "Could not reach GitHub".
-assert.match(app, /\$\("#unlock-form"\)\.addEventListener\("submit", async event => \{\n  event\.preventDefault\(\);\n(?:  \/\/[^\n]*\n)*  const passphrase = new FormData\(event\.currentTarget\)\.get\("passphrase"\);/);
-assert.match(app, /const key = await deriveDeviceKey\(saved, passphrase\);/);
+assert.match(app, /\$\("#setup-form"\)\.addEventListener\("submit", async event => \{\n  event\.preventDefault\(\);\n  const tokenValue = new FormData\(event\.currentTarget\)\.get\("token"\)\.trim\(\);/);
+assert.match(app, /function isLegacySecret/);
 // The daily form's error path reports through the captured form, not a dead reference.
 assert.doesNotMatch(app, /catch \(error\) \{ setStatus\(event\.currentTarget/);
 // No handler may touch event.currentTarget after an await: the reads that remain are
@@ -449,8 +452,10 @@ for (const handler of app.split('addEventListener("submit"').slice(1)) {
 const dailyForm = html.slice(html.indexOf('<form id="daily-form"'), html.indexOf("</form>", html.indexOf('<form id="daily-form"')));
 const formNames = [...dailyForm.matchAll(/\sname="([^"]+)"/g)].map(match => match[1]);
 const payloadFn = app.slice(app.indexOf("function dailyPayload"), app.indexOf("\n}", app.indexOf("return payload;")));
-const payloadReads = new Set([...payloadFn.matchAll(/data\.get\("([^"]+)"\)|numberValue\(data,\s*"([^"]+)"/g)]
-  .map(match => match[1] || match[2]));
+const payloadReads = new Set();
+for (const match of payloadFn.matchAll(/data\.get\("([^"]+)"\)|numberValue\(data,\s*"([^"]+)"|clockParts\(data,\s*"([^"]+)",\s*"([^"]+)"/g)) {
+  for (const name of match.slice(1)) if (name) payloadReads.add(name);
+}
 
 // Every input in the form is one dailyPayload reads...
 for (const name of formNames) {
@@ -464,22 +469,21 @@ for (const name of payloadReads) {
 // of these names may be renamed, removed or added without changing the record too.
 assert.deepEqual([...formNames].sort(), [
   "cardio_min", "cardio_speed", "cardio_type", "carbs_g", "date", "fat_g", "fiber_g",
-  "incline_pct", "kcal", "notes", "pain", "pasted_text", "protein_g", "resting_hr",
-  "session_minutes", "session_status", "sleep_hours", "steps", "unplanned_eating",
-  "water_ml", "weight_kg",
+  "incline_pct", "kcal", "notes", "pasted_text", "protein_g", "resting_hr",
+  "session_hours", "session_minutes", "sleep_hours", "sleep_minutes", "steps",
+  "unplanned_eating", "water_ml", "weight_kg",
 ].sort());
 
-// The plan never fills the session status on his behalf: that value rode along with
-// nothing entered, and was enough on its own to pass the "at least one observed value"
-// guard, so an untouched form on a rest day submitted a rest day.
+assert.doesNotMatch(html, /name="session_status"|name="pain"|id="daily-session"|id="exercise-fields"/);
 assert.doesNotMatch(app, /status\.value\s*=\s*"rest"/);
-assert.doesNotMatch(app, /\[name=session_status\]"\)\s*;\n\s*if \(plan\.session/);
-// The plan is shown instead, on the summary of the section it belongs to.
-assert.match(app, /\$\("#session-plan"\)\.textContent = plan\.exercises\.length/);
+assert.match(app, /Session pasted/);
 
-// Both submit guards are still wired.
+// Paste or any other observed field is enough to send. Typed sets are gone.
 assert.match(app, /if\(!Object\.keys\(payload\)\.length\)throw new Error\("Enter at least one observed value\."\)/);
-assert.match(app, /\["done","partial"\]\.includes\(payload\.session\?\.status\) && !payload\.session\.exercises\?\.length\)throw new Error\("A done or partial session needs at least one exercise with recorded sets\."\)/);
+assert.doesNotMatch(app, /A done or partial session needs at least one exercise/);
+for (const [name, step] of [["weight_kg", "0.01"], ["incline_pct", "0.01"], ["cardio_speed", "0.01"], ["waist_cm", "0.01"], ["alcohol_units", "0.01"]]) {
+  assert.match(html, new RegExp(`name="${name}"[^>]*step="${step}"`));
+}
 
 // The three numbers he logs most days are in front of every disclosure.
 const leadFields = dailyForm.slice(0, dailyForm.indexOf("<details"));
@@ -487,18 +491,14 @@ for (const name of ["weight_kg", "steps", "kcal"]) {
   assert.match(leadFields, new RegExp(`name="${name}"`), `${name} must be visible before any disclosure`);
 }
 // Nutrition detail, Cardio and the Session extras are disclosed, natively.
-for (const id of ["daily-paste", "daily-photos", "daily-meals", "daily-nutrition", "daily-cardio", "daily-session", "daily-recovery", "daily-notes"]) {
+for (const id of ["daily-paste", "daily-photos", "daily-meals", "daily-nutrition", "daily-cardio", "daily-recovery", "daily-notes"]) {
   assert.match(dailyForm, new RegExp(`<details class="disclosure" id="${id}">`));
 }
-assert.equal((dailyForm.match(/<summary>/g) || []).length, 8);
-// Writing the session and photographing it sit together, right above Session itself.
+assert.equal((dailyForm.match(/<summary>/g) || []).length, 7);
 assert.ok(dailyForm.indexOf('id="daily-paste"') < dailyForm.indexOf('id="daily-photos"'));
-assert.ok(dailyForm.indexOf('id="daily-photos"') < dailyForm.indexOf('id="daily-session"'));
-// The exercise rows live inside the session disclosure.
-assert.ok(dailyForm.indexOf('id="daily-session"') < dailyForm.indexOf('id="exercise-fields"'));
 
 // A collapsed section may not hide an entered value: every summary carries a live count.
-assert.equal((dailyForm.match(/class="disclosure-count" hidden/g) || []).length, 8);
+assert.equal((dailyForm.match(/class="disclosure-count" hidden/g) || []).length, 7);
 assert.match(app, /function updateDisclosureCounts\(\)/);
 assert.match(app, /for \(const eventName of \["input","change"\]\) \$\("#daily-form"\)\.addEventListener\(eventName, updateDisclosureCounts\)/);
 // reset() fires no input event, so the counts are recomputed explicitly after a submit.
@@ -577,5 +577,16 @@ assert.match(gym, /confirmation\.rendered_sha256: the readback on screen was not
 assert.match(gym, /required = \{"schema", "interface", "id", "readback_sha256", "confirmed_at", "client_id"\}/);
 
 console.log("webapp offline-queue assertions passed");
+
+assert.deepEqual(clockParts(7, 20), {hours: 7, minutes: 20});
+assert.equal(clockToHours(clockParts(7, 20), 14), 7 + 20 / 60);
+assert.deepEqual(hoursToClock(7 + 20 / 60), {hours: 7, minutes: 20});
+assert.equal(clockToMinutes(clockParts(1, 5)), 65);
+assert.deepEqual(minutesToClock(65), {hours: 1, minutes: 5});
+assert.equal(clockParts(undefined, undefined), undefined);
+assert.equal(clockToHours(clockParts(undefined, 30), 14), 0.5);
+assert.throws(() => clockParts(1, 60), /Minutes must be between 0 and 59/);
+assert.throws(() => clockParts(-1, 0), /Hours must be 0 or more/);
+assert.throws(() => clockToHours(clockParts(14, 1), 14), /Sleep cannot exceed 14 hours/);
 
 console.log("webapp regression assertions passed");

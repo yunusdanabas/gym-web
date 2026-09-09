@@ -24,17 +24,11 @@
     <section class="gate-card">
       <p class="kicker">Private · GitHub-backed</p>
       <h1>GYM Ledger</h1>
-      <p id="gate-copy" class="lede">Unlock this device to see or record anything.</p>
-      <form id="unlock-form" class="stack" hidden>
-        <label>Passphrase<input name="passphrase" type="password" minlength="12" autocomplete="current-password" required></label>
-        <button type="submit">Unlock</button>
-      </form>
+      <p id="gate-copy" class="lede">Connect this device once. Your GitHub token stays on this browser.</p>
       <form id="setup-form" class="stack" hidden>
         <label>Fine-grained GitHub token<input name="token" type="password" autocomplete="off" required></label>
-        <label>New passphrase<input name="passphrase" type="password" minlength="12" autocomplete="new-password" required></label>
-        <label>Repeat passphrase<input name="repeat" type="password" minlength="12" autocomplete="new-password" required></label>
-        <p class="hint">The token is encrypted on this device. It is never stored in the site or sent anywhere except GitHub.</p>
-        <button type="submit">Secure this device</button>
+        <p class="hint">The token stays on this device. Anyone who can unlock this phone or PC can use the inbox token. It is never sent anywhere except GitHub.</p>
+        <button type="submit">Connect this device</button>
       </form>
       <p id="gate-status" class="status" role="status"></p>
     </section>
@@ -43,7 +37,7 @@
   <div id="app" hidden>
     <header class="topbar">
       <div><p class="kicker">Private training record</p><h1>GYM Ledger</h1></div>
-      <div class="header-actions"><span id="network-pill" class="pill network">online</span><button id="lock-button" class="quiet" type="button">Lock</button></div>
+      <div class="header-actions"><span id="network-pill" class="pill network">online</span></div>
     </header>
 
     <!-- Visible on every view, Today and Review included: an entry typed without signal
@@ -70,7 +64,7 @@
                other group is behind a disclosure whose summary says how much it holds, so
                a collapsed section can never hide something already entered. -->
           <div class="field-grid lead-fields">
-            <label>Weight <small>kg</small><input name="weight_kg" type="number" min="30" max="250" step="0.1" inputmode="decimal"></label>
+            <label>Weight <small>kg</small><input name="weight_kg" type="number" min="30" max="250" step="0.01" inputmode="decimal"></label>
             <label>Steps<input name="steps" type="number" min="0" max="60000" step="1" inputmode="numeric"></label>
             <label>Calories <small>kcal</small><input name="kcal" type="number" min="500" max="6000" step="1" inputmode="numeric"></label>
           </div>
@@ -106,7 +100,8 @@
           <details class="disclosure" id="daily-recovery">
             <summary><span class="disclosure-title">Sleep and heart rate</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
             <div class="field-grid">
-              <label>Sleep <small>hours</small><input name="sleep_hours" type="number" min="0" max="14" step="0.1" inputmode="decimal"></label>
+              <label>Sleep <small>hours</small><input name="sleep_hours" type="number" min="0" max="14" step="1" inputmode="numeric"></label>
+              <label>Sleep <small>minutes</small><input name="sleep_minutes" type="number" min="0" max="59" step="1" inputmode="numeric"></label>
               <label>Resting HR <small>bpm</small><input name="resting_hr" type="number" min="30" max="120" step="1" inputmode="numeric"></label>
             </div>
           </details>
@@ -115,6 +110,10 @@
             <summary><span class="disclosure-title">Write the session</span><span class="disclosure-note">paste the app export, or type shorthand</span><span class="disclosure-count" hidden></span></summary>
             <p class="hint">Paste a FitNotes or EatBetter export whole — exercise headings and one set per line are read as written. A name the plan does not carry is reported back, never dropped.</p>
             <label>Session text<textarea name="pasted_text" rows="9" placeholder="** Machine Chest Press **&#10;- 55.0 lbs x 12 reps&#10;- 55.0 lbs x 10 reps&#10;&#10;or shorthand:&#10;w 91.0 / 2180 172 208 61 / steps 7412 / chest 55 12,11,10,10"></textarea></label>
+            <div class="field-grid">
+              <label>Session <small>hours</small><input name="session_hours" type="number" min="0" max="8" step="1" inputmode="numeric"></label>
+              <label>Session <small>minutes</small><input name="session_minutes" type="number" min="0" max="59" step="1" inputmode="numeric"></label>
+            </div>
           </details>
 
           <details class="disclosure" id="daily-photos">
@@ -124,23 +123,13 @@
             <ul id="photo-list" class="clean-list"></ul>
           </details>
 
-          <details class="disclosure" id="daily-session">
-            <summary><span class="disclosure-title">Session</span><span class="disclosure-note" id="session-plan"></span><span class="disclosure-count" hidden></span></summary>
-            <div class="field-grid">
-              <label>Status<select name="session_status"><option value="">Unread</option><option value="rest">Rest</option><option value="done">Done</option><option value="partial">Partial</option><option value="skipped">Skipped</option></select></label>
-              <label>Duration <small>minutes</small><input name="session_minutes" type="number" min="0" step="1" inputmode="numeric"></label>
-              <label>Pain<select name="pain"><option value="">Unread</option><option value="false">No</option><option value="true">Yes</option></select></label>
-            </div>
-            <div id="exercise-fields" class="exercise-list"></div>
-          </details>
-
           <details class="disclosure" id="daily-cardio">
             <summary><span class="disclosure-title">Cardio</span><span class="disclosure-note"></span><span class="disclosure-count" hidden></span></summary>
             <div class="field-grid">
               <label>Minutes<input name="cardio_min" type="number" min="0" step="1" inputmode="numeric"></label>
               <label>Type<input name="cardio_type" value="treadmill"></label>
-              <label>Incline <small>%</small><input name="incline_pct" type="number" min="0" step="0.1" inputmode="decimal"></label>
-              <label>Speed <small>mph</small><input name="cardio_speed" type="number" min="0" step="0.1" inputmode="decimal"></label>
+              <label>Incline <small>%</small><input name="incline_pct" type="number" min="0" step="0.01" inputmode="decimal"></label>
+              <label>Speed <small>mph</small><input name="cardio_speed" type="number" min="0" step="0.01" inputmode="decimal"></label>
             </div>
           </details>
 
@@ -159,7 +148,7 @@
         <form id="weekly-form" class="form-card stack" role="tabpanel" aria-labelledby="tab-weekly" tabindex="0" hidden>
           <label>ISO week<input name="week" pattern="\d{4}-W\d{2}" placeholder="2026-W36" required></label>
           <div class="field-grid">
-            <label>Waist <small>cm</small><input name="waist_cm" type="number" min="40" max="250" step="0.1" required></label>
+            <label>Waist <small>cm</small><input name="waist_cm" type="number" min="40" max="250" step="0.01" required></label>
             <label>Sleep quality <small>0–10</small><input name="sleep_quality" type="number" min="0" max="10" required></label>
             <label>Energy <small>0–10</small><input name="energy" type="number" min="0" max="10" required></label>
             <label>Stress <small>0–10</small><input name="stress" type="number" min="0" max="10" required></label>
@@ -168,7 +157,7 @@
             <label>Cardio difficulty <small>0–10</small><input name="cardio_difficulty" type="number" min="0" max="10" required></label>
             <label>Motivation <small>0–10</small><input name="motivation" type="number" min="0" max="10" required></label>
             <label>Restaurant meals<input name="restaurant_meals" type="number" min="0" required></label>
-            <label>Alcohol units<input name="alcohol_units" type="number" min="0" step="0.1" required></label>
+            <label>Alcohol units<input name="alcohol_units" type="number" min="0" step="0.01" required></label>
           </div><label>Notes<textarea name="notes" rows="3"></textarea></label>
           <button type="submit">Send weekly review</button><p class="status" role="status"></p>
         </form>

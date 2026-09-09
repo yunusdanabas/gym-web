@@ -1,4 +1,5 @@
-import {bytesToB64, sealToken, deriveDeviceKey, sealWithKey, openWithKey} from "./crypto.js";
+import {bytesToB64, generateDeviceKey, sealWithKey, openWithKey} from "./crypto.js";
+import {clockParts as clockFromValues, clockToHours, clockToMinutes, hoursToClock, minutesToClock} from "./clock.js";
 import {CONFIG} from "./config.js";
 import {assertTopLevel, assertPathAllowed, clearCredentialFields, isFramed} from "./guard.js";
 import {
@@ -13,19 +14,16 @@ const MAIN = CONFIG.mainBranch;
 const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
 const READ_PREFIXES = CONFIG.readPrefixes;
 const WRITE_PREFIXES = CONFIG.writePrefixes;
-const LOCK_AFTER_MS = 30 * 60 * 1000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 let token = "";
-// The passphrase-derived AES key, held only while unlocked and dropped with the token.
-// It seals the offline outbox, so nothing readable waits on the device for signal.
+// Device-generated AES key, stored in IndexedDB and held in memory while the app is open.
+// It seals the token, the offline outbox and local drafts.
 let deviceKey = null;
 let ledgerState = null;
-let blockConfig = null;
-let lockTimer = null;
 let queuedCount = 0;
-// Today's saved draft, for ticking off what is already logged on the Do next card.
+// Today's saved draft, so Do next can say when the session text is already pasted.
 let todayDraft = null;
 let outboxNote = "";
 let draining = false;
@@ -104,11 +102,10 @@ const db = (action, value) => deviceValue(action, "secret", value);
 
 // ------------------------------------------------------------------ the outbox
 // A submission typed with no signal is sealed with the device key and held here until
-// it can be sent. Draining needs the token, and the token and the key arrive together
-// at unlock, so the plaintext is available exactly when it is needed and at no other
-// time. See "Device security" in docs/web-app.md.
+// it can be sent. Draining needs the token, and the token and the key are loaded
+// together when the app opens. See "Device security" in docs/web-app.md.
 async function queueSubmission(item) {
-  if (!deviceKey) throw new Error("This device is locked, so nothing can be queued.");
+  if (!deviceKey) throw new Error("This device is not connected, so nothing can be queued.");
   const sealed = await sealWithKey(deviceKey, JSON.stringify(item));
   await withStore(OUTBOX_STORE, "readwrite", store => store.put({id:item.id, queued_at:chicagoTimestamp(), ...sealed}));
 }
@@ -127,7 +124,7 @@ function makeDraft(date, payload) {
 }
 
 async function putLocalDraft(draft) {
-  if (!deviceKey) throw new Error("This device is locked, so nothing can be saved.");
+  if (!deviceKey) throw new Error("This device is not connected, so nothing can be saved.");
   const sealed = await sealWithKey(deviceKey, JSON.stringify(draft));
   await withStore(DRAFT_STORE, "readwrite", store => store.put({date:draft.date, queued_at:draft.updated_at, ...sealed}));
 }
@@ -140,25 +137,9 @@ async function getLocalDraft(date) {
   } catch (_) { return null; }
 }
 
-// config/block.json is the one file the *write* path needs: without it there are no
-// exercise rows, so a done or partial session could never clear its own guard offline.
-// Sealed like everything else this device keeps, and refreshed at every online unlock.
-async function cacheBlockConfig(value) {
-  if (!deviceKey || !value) return;
-  try { await deviceValue("put", "block", await sealWithKey(deviceKey, JSON.stringify(value))); } catch (_) {}
-}
-
-async function cachedBlockConfig() {
-  if (!deviceKey) return null;
-  try {
-    const sealed = await deviceValue("get", "block");
-    return sealed ? JSON.parse(await openWithKey(deviceKey, sealed)) : null;
-  } catch (_) { return null; }
-}
-
 async function drainOutbox() {
-  // Never while locked: the entries are sealed with the device key, and sending them
-  // needs the token. Both arrive at unlock and both leave at lock.
+  // Never while the token is absent: the entries are sealed with the device key, and
+  // sending them needs the token. Both are loaded when the app opens.
   if (draining || !token || !deviceKey) return;
   draining = true;
   let sent = 0;
@@ -207,7 +188,7 @@ async function renderOutbox() {
 }
 
 async function github(path, options = {}) {
-  if (!token) throw new Error("This device is locked.");
+  if (!token) throw new Error("This device is not connected.");
   const response = await fetch(`${API}${path}`, {
     ...options,
     headers:{Accept:"application/vnd.github+json", Authorization:`Bearer ${token}`, "X-GitHub-Api-Version":"2022-11-28", ...(options.headers || {})},
@@ -329,6 +310,24 @@ function numberValue(data, name, integer = false) {
   return integer ? Number.parseInt(raw, 10) : Number(raw);
 }
 
+function clockParts(data, hoursName, minutesName) {
+  return clockFromValues(numberValue(data, hoursName, true), numberValue(data, minutesName, true));
+}
+
+function applyClockHours(form, hoursName, minutesName, hoursValue) {
+  const parts = hoursToClock(hoursValue);
+  if (!parts) return;
+  setNamed(form, hoursName, parts.hours);
+  setNamed(form, minutesName, parts.minutes);
+}
+
+function applyClockMinutes(form, hoursName, minutesName, minutesValue) {
+  const parts = minutesToClock(minutesValue);
+  if (!parts) return;
+  setNamed(form, hoursName, parts.hours);
+  setNamed(form, minutesName, parts.minutes);
+}
+
 function section(values) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined && value !== ""));
 }
@@ -343,15 +342,6 @@ function makeSubmission(kind, target, payload, extra = {}) {
   if (!payload || (typeof payload === "object" && !Object.keys(payload).length)) delete item.payload;
   if (correctionOf) item.supersedes = correctionOf;
   return item;
-}
-
-function plannedFor(dateText) {
-  if (!blockConfig) return {session:"Rest", exercises:[]};
-  const date = new Date(`${dateText}T12:00:00Z`);
-  const dayName = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][date.getUTCDay()];
-  const entry = blockConfig.schedule[dayName];
-  const session = typeof entry === "object" ? entry.session : entry;
-  return {session, exercises:blockConfig.sessions[session] || []};
 }
 
 // A field counts as entered only when it differs from what the form shipped with, so
@@ -382,44 +372,11 @@ function openDisclosure(details, wanted) {
   if (details && (wanted || countEntered(details))) details.open = true;
 }
 
-function renderExercises(dateText) {
-  const container = $("#exercise-fields");
-  const plan = plannedFor(dateText);
-  // The session status is NOT pre-filled from the plan, and a status he chose is never
-  // cleared when the date changes. Pre-filling `rest` on a planned rest day put a value
-  // he had not stated into the record, and it was enough on its own to satisfy the "at
-  // least one observed value" guard — so an untouched form submitted a rest day. Every
-  // other plan-derived value in this form rides along with something he did enter (an
-  // exercise row's name and target, the cardio type beside its minutes); this one rode
-  // along with nothing. The summary below says what the plan expects instead.
-  // The summary says what the day holds, so the section can stay shut without hiding
-  // what is behind it. Opening it on a training day would put six rows and 2,000px back
-  // in front of the three numbers he logs most days.
-  $("#session-plan").textContent = plan.exercises.length
-    ? `${plan.session} · ${plan.exercises.length} exercises`
-    : (plan.session === "Rest" ? "rest day" : "not covered");
-  if (!plan.exercises.length) {
-    container.innerHTML = `<p class="hint">${esc(plan.session === "Rest" ? "Rest day" : "No approved training block covers this date.")}</p>`;
-    openDisclosure($("#daily-session"), false);
-    updateDisclosureCounts();
-    return;
-  }
-  container.innerHTML = plan.exercises.map((exercise, index) => `
-    <div class="exercise-row" data-index="${index}" data-plan-name="${esc(exercise.name)}" data-target="${esc(`${exercise.sets}x${exercise.reps}`)}" data-unit="${esc(exercise.unit || "lb")}">
-      <label class="exercise-name">${esc(exercise.name)}<small>${exercise.sets} × ${esc(exercise.reps)} · one working load</small><input class="actual-name" aria-label="Actual exercise name, if substituted" placeholder="Substitution, if any"></label>
-      <label>Load<input class="load" type="number" min="0" step="0.5" inputmode="decimal"></label>
-      ${[1,2,3,4].map(set => `<label>S${set}<input class="set" type="number" min="0" step="1" inputmode="numeric"></label>`).join("")}
-      <label>RIR<input class="rir" type="number" min="0" max="10" step="1" inputmode="numeric"></label>
-    </div>`).join("");
-  // Counted after the rows exist, not before.
-  updateDisclosureCounts();
-}
-
 function dailyPayload(form) {
   const data = new FormData(form);
   const payload = {};
   addSection(payload, "body", {weight_kg:numberValue(data,"weight_kg")});
-  addSection(payload, "sleep", {hours:numberValue(data,"sleep_hours")});
+  addSection(payload, "sleep", {hours:clockToHours(clockParts(data,"sleep_hours","sleep_minutes"), 14)});
   addSection(payload, "readiness", {resting_hr:numberValue(data,"resting_hr",true)});
   addSection(payload, "nutrition", {
     kcal:numberValue(data,"kcal",true), protein_g:numberValue(data,"protein_g",true), carbs_g:numberValue(data,"carbs_g",true),
@@ -436,20 +393,8 @@ function dailyPayload(form) {
   }
   cardio.source = "typed";
   addSection(payload, "activity", {steps:numberValue(data,"steps",true), cardio:cardio.min === undefined ? undefined : [cardio]});
-  const session = section({status:clean(data.get("session_status")), minutes:numberValue(data,"session_minutes",true), pain:data.get("pain") === "" ? undefined : data.get("pain") === "true"});
-  const exercises = $$(".exercise-row", form).map(row => {
-    const sets = $$(".set", row).map(input => input.value === "" ? undefined : Number.parseInt(input.value,10)).filter(value => value !== undefined);
-    if (!sets.length) return null;
-    const unit = row.dataset.unit;
-    const exercise = {name:$(".actual-name",row).value.trim() || row.dataset.planName, target:row.dataset.target, unit, sets, notes:""};
-    const load = $(".load", row).value;
-    if (load !== "" && unit !== "bw" && unit !== "s") exercise.weight = Number(load);
-    const rir = $(".rir", row).value;
-    if (rir !== "") exercise.rir_last = Number.parseInt(rir,10);
-    return exercise;
-  }).filter(Boolean);
-  if (exercises.length) session.exercises = exercises;
-  if (Object.keys(session).length) payload.session = session;
+  const sessionMinutes = clockToMinutes(clockParts(data, "session_hours", "session_minutes"));
+  if (sessionMinutes !== undefined) payload.session = {minutes: sessionMinutes};
   if (data.get("notes").trim()) payload.notes = data.get("notes").trim();
   const pastedRaw = data.get("pasted_text");
   if (pastedRaw && String(pastedRaw).trim()) payload.text = String(pastedRaw).trim();
@@ -627,7 +572,7 @@ function mealIdFromName(name) {
 function applyDailyPayload(form, payload) {
   if (!payload || typeof payload !== "object") return;
   setNamed(form, "weight_kg", payload.body?.weight_kg);
-  setNamed(form, "sleep_hours", payload.sleep?.hours);
+  applyClockHours(form, "sleep_hours", "sleep_minutes", payload.sleep?.hours);
   setNamed(form, "resting_hr", payload.readiness?.resting_hr);
   setNamed(form, "kcal", payload.nutrition?.kcal);
   setNamed(form, "protein_g", payload.nutrition?.protein_g);
@@ -644,28 +589,12 @@ function applyDailyPayload(form, payload) {
     setNamed(form, "incline_pct", cardio.incline_pct);
     setNamed(form, "cardio_speed", cardio.speed);
   }
-  setNamed(form, "session_status", payload.session?.status);
-  setNamed(form, "session_minutes", payload.session?.minutes);
-  if (payload.session && payload.session.pain !== undefined) {
-    setNamed(form, "pain", payload.session.pain ? "true" : "false");
-  }
+  applyClockMinutes(form, "session_hours", "session_minutes", payload.session?.minutes);
   if (payload.notes) setNamed(form, "notes", payload.notes);
   if (payload.text) setNamed(form, "pasted_text", payload.text);
   if (Array.isArray(payload.chosen_meals)) {
     chosenMealIds = payload.chosen_meals.filter(id => mealById(id));
     renderMealChips();
-  }
-  for (const exercise of payload.session?.exercises || []) {
-    const rows = $$(".exercise-row", form);
-    const row = rows.find(item => item.dataset.planName === exercise.name)
-      || rows.find(item => !$(".actual-name", item).value && $$(".set", item).every(input => input.value === ""));
-    if (!row) continue;
-    if (exercise.name && exercise.name !== row.dataset.planName) $(".actual-name", row).value = exercise.name;
-    if (exercise.weight !== undefined) $(".load", row).value = exercise.weight;
-    if (exercise.rir_last !== undefined) $(".rir", row).value = exercise.rir_last;
-    $$(".set", row).forEach((input, index) => {
-      if (exercise.sets && exercise.sets[index] !== undefined) input.value = exercise.sets[index];
-    });
   }
   updateDisclosureCounts();
   for (const details of $$("details.disclosure", form)) {
@@ -680,7 +609,6 @@ function resetDailyForm(date) {
   if (dateInput) dateInput.value = date;
   chosenMealIds = [];
   renderMealChips();
-  renderExercises(date);
   updateDisclosureCounts();
 }
 
@@ -712,16 +640,6 @@ function restoreDailyDraftIfEmpty() {
 // styles.css does the paging: a carousel library would be the only dependency in the
 // app, and the platform already ships this.
 
-const sameExercise = (a, b) => normalizeName(a) === normalizeName(b);
-const normalizeName = value => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-
-// Only sets that were actually recorded count as logged; an empty row is not progress.
-function loggedExerciseNames() {
-  return (todayDraft?.payload?.session?.exercises || [])
-    .filter(item => (item.sets || []).length)
-    .map(item => item.name);
-}
-
 function deckCard(kicker, body, label) {
   return `<article class="card deck-card" tabindex="0" role="group" aria-label="${esc(label)}"><p class="kicker">${esc(kicker)}</p>${body}</article>`;
 }
@@ -734,15 +652,13 @@ function doNextCard(brief, train) {
       ? esc(outstanding.what)
       : "Nothing outstanding. Log weight and steps when you have them."}</p>`, "Do next");
   }
-  const logged = loggedExerciseNames();
-  const isLogged = item => logged.some(name => sameExercise(name, item.name));
-  const done = items.filter(isLogged).length;
+  const pasted = Boolean(todayDraft?.payload?.text);
   const rows = items.map(item => {
     const load = item.load == null ? "establish" : `${item.load} ${item.unit || "lb"}`;
-    return `<li class="${isLogged(item) ? "logged" : ""}"><b class="tick" aria-hidden="true">${isLogged(item) ? "\u2713" : "\u00b7"}</b><span><strong>${esc(item.name)}</strong><small>${esc(formatTarget(item.target))} \u00b7 ${esc(load)}</small></span></li>`;
+    return `<li><b class="tick" aria-hidden="true">\u00b7</b><span><strong>${esc(item.name)}</strong><small>${esc(formatTarget(item.target))} \u00b7 ${esc(load)}</small></span></li>`;
   }).join("");
   return deckCard(`Do next \u00b7 ${train.session || ""}${train.time ? ` \u00b7 ${train.time}` : ""}`,
-    `<p class="hero-line">${done}/${items.length} logged</p><ul class="load-list ticks">${rows}</ul>${train.cardio
+    `<p class="hero-line">${pasted ? "Session pasted" : `${items.length} planned`}</p><ul class="load-list ticks">${rows}</ul>${train.cardio
       ? `<p class="hint">Cardio: ${esc(train.cardio.min)} min ${esc(train.cardio.type)}</p>` : ""}`,
     "Do next, today's session");
 }
@@ -921,20 +837,15 @@ async function unlock(value, key) {
   let offline = false;
   try {
     if (!(await connectionTest())) throw new Error("The token cannot access the expected private repository.");
-    blockConfig = (await getJsonFile(CONFIG.blockPath)).value;
-    await cacheBlockConfig(blockConfig);
     try { await loadMealCatalog(); } catch (_) {}
   } catch (error) {
-    // The passphrase has already proved itself — it decrypted the token before any of
-    // this ran. What fails here is only GitHub's liveness check, and refusing to open
-    // the app over it is what made "no signal" mean "no ledger" in a basement gym.
+    // The stored key has already opened the token. What fails here is only GitHub's
+    // liveness check, and refusing to open the app over it is what made "no signal"
+    // mean "no ledger" in a basement gym.
     if (!isNetworkFailure(error)) throw error;
     offline = true;
-    blockConfig = await cachedBlockConfig();
   }
   $("#locked").hidden = true; $("#app").hidden = false;
-  renderExercises($("#daily-form [name=date]").value);
-  resetLockTimer();
   if (offline) {
     ledgerState = null;
     await renderOutbox();
@@ -950,28 +861,41 @@ async function unlock(value, key) {
 }
 
 function lock() {
-  token = ""; deviceKey = null; ledgerState = null; blockConfig = null;
-  clearTimeout(lockTimer);
+  token = ""; deviceKey = null; ledgerState = null;
   $("#app").hidden = true; $("#locked").hidden = false;
   $("#today-content").innerHTML = ""; $("#review-list").innerHTML = ""; $("#history-list").innerHTML = "";
-  $("#unlock-form").hidden = false; $("#setup-form").hidden = true;
+  $("#setup-form").hidden = false;
   clearCredentialFields(document);
   $("#gate-status").textContent = "";
 }
 
-function resetLockTimer() {
-  if (!token) return;
-  clearTimeout(lockTimer);
-  lockTimer = setTimeout(lock, LOCK_AFTER_MS);
+function isLegacySecret(saved) {
+  return Boolean(saved && (saved.schema === 1 || saved.kdf === "PBKDF2-SHA256"));
 }
 
-// Everything used to be reported as a wrong passphrase, so a dead spot in the gym, a
-// GitHub outage or a rate limit all read as "you typed it wrong" — the error he is most
-// likely to see, and the least likely to be true.
+async function wipeDeviceStores() {
+  await db("delete");
+  await deviceValue("delete", "device-key");
+  await deviceValue("delete", "block");
+  await outboxClear();
+  await draftsClear();
+}
+
+function showSetup(message = "") {
+  $("#locked").hidden = false;
+  $("#app").hidden = true;
+  $("#setup-form").hidden = false;
+  $("#gate-copy").textContent = "Connect this device once. Your GitHub token stays on this browser.";
+  $("#gate-status").textContent = message;
+  clearCredentialFields(document);
+}
+
+// A dead spot in the gym, a GitHub outage or a rate limit used to read as a wrong
+// passphrase — the error he is most likely to see, and the least likely to be true.
 function unlockFailureMessage(error) {
   if (error.message === "GYM Ledger refuses to run inside a frame.") return error.message;
-  if (!navigator.onLine) return "This device is offline. Unlock again when you have signal.";
-  if (error.name === "OperationError" || error.name === "InvalidAccessError") return "That passphrase did not unlock this device.";
+  if (!navigator.onLine) return "This device is offline. It will open when you have signal, or stay offline if the token is already stored.";
+  if (error.name === "OperationError" || error.name === "InvalidAccessError") return "This device could not be opened. Connect it again.";
   if (error.status === 401 || error.status === 403) {
     return error.status === 403 && /rate limit/i.test(error.message)
       ? "GitHub is rate-limiting this token. Try again in a few minutes."
@@ -980,52 +904,45 @@ function unlockFailureMessage(error) {
   if (error.status === 404) return "GitHub could not find the private repository or the file. Check the token's repository access.";
   if (error.status) return `GitHub returned ${error.status}: ${error.message}`;
   if (error instanceof TypeError) return "Could not reach GitHub. Check your connection and try again.";
-  return error.message || "Unlock failed.";
+  return error.message || "Could not open this device.";
 }
 
 async function initializeGate() {
-  const saved = await db("get");
   clearCredentialFields(document);
-  $("#unlock-form").hidden = !saved;
-  $("#setup-form").hidden = Boolean(saved);
-  $("#gate-copy").textContent = saved ? "Unlock this device to see or record anything." : "Connect this device once. Your GitHub token will be encrypted locally.";
+  const saved = await db("get");
+  if (isLegacySecret(saved)) {
+    await wipeDeviceStores();
+    showSetup("This device used a passphrase. Paste the inbox token again. Unsent entries from the old lock cannot be opened.");
+    return;
+  }
+  const key = await deviceValue("get", "device-key");
+  if (saved && key) {
+    try {
+      await unlock(await openWithKey(key, saved), key);
+      return;
+    } catch (error) {
+      token = ""; deviceKey = null;
+      showSetup(unlockFailureMessage(error));
+      return;
+    }
+  }
+  showSetup();
 }
 
 $("#setup-form").addEventListener("submit", async event => {
   event.preventDefault();
-  const form = event.currentTarget, data = new FormData(form), passphrase = data.get("passphrase");
-  if (passphrase !== data.get("repeat")) { clearCredentialFields(document); $("#gate-status").textContent = "Passphrases do not match."; return; }
+  const tokenValue = new FormData(event.currentTarget).get("token").trim();
   try {
     assertTopLevel();
     $("#gate-status").textContent = "Checking GitHub and encrypting…";
-    token = data.get("token").trim();
+    token = tokenValue;
     if (!(await connectionTest())) throw new Error("Use a token limited to the private GYM repository.");
-    // sealToken hands back the derived key as well as the record, so setup pays the
-    // 600,000 PBKDF2 iterations once rather than twice.
-    const sealed = await sealToken(token, passphrase);
-    await db("put", sealed.record);
-    await unlock(token, sealed.key);
+      const key = await deviceValue("get", "device-key") || await generateDeviceKey();
+      const sealed = await sealWithKey(key, token);
+      await db("put", {schema:2, kdf:"device-key", cipher:"AES-256-GCM", ...sealed});
+      await deviceValue("put", "device-key", key);
+    await unlock(token, key);
   } catch (error) { token = ""; deviceKey = null; $("#gate-status").textContent = error.message; }
-  finally { clearCredentialFields(document); }
-});
-
-$("#unlock-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  // Read the passphrase now, synchronously. After the first await the event has finished
-  // dispatching and event.currentTarget is null, so reading it later threw
-  // "Failed to construct 'FormData'" — a TypeError that unlockFailureMessage reported as
-  // "Could not reach GitHub". Every unlock after the first lock failed, and blamed the
-  // network for it.
-  const passphrase = new FormData(event.currentTarget).get("passphrase");
-  try {
-    assertTopLevel();
-    $("#gate-status").textContent = "Unlocking…";
-    const saved = await db("get");
-    if (!saved) throw new Error("This device is not connected yet.");
-    // Derived once and kept: it decrypts the token and seals the offline outbox.
-    const key = await deriveDeviceKey(saved, passphrase);
-    await unlock(await openWithKey(key, saved), key);
-  } catch (error) { token = ""; deviceKey = null; $("#gate-status").textContent = unlockFailureMessage(error); }
   finally { clearCredentialFields(document); }
 });
 
@@ -1038,8 +955,7 @@ $("#daily-form").addEventListener("submit", async event => {
   try {
     const date=new FormData(form).get("date"), payload=dailyPayload(form);
     if(!Object.keys(payload).length)throw new Error("Enter at least one observed value.");
-    if(["done","partial"].includes(payload.session?.status) && !payload.session.exercises?.length)throw new Error("A done or partial session needs at least one exercise with recorded sets.");
-    await submitMain(makeSubmission("manual", {date}, payload), form); renderExercises(chicagoDate());
+    await submitMain(makeSubmission("manual", {date}, payload), form);
   }
   catch (error) { setStatus(form, error.message, true); }
 });
@@ -1206,7 +1122,7 @@ $("#review-list").addEventListener("click", async event => {
       } else if (kind === "band" || kind === "upload") {
         throw new Error("Evidence entries are corrected from the laptop with ./gym ingest.");
       } else {
-        showView("entry"); showEntryTab("daily"); $("#daily-form [name=date]").value=target; renderExercises(target);
+        showView("entry"); showEntryTab("daily"); $("#daily-form [name=date]").value=target;
       }
       // Set last: showView and showEntryTab both clear the flag on purpose.
       correctionOf=card.dataset.id;
@@ -1246,18 +1162,14 @@ for (const eventName of ["input","change"]) $("#daily-form").addEventListener(ev
 $("#weekly-form [name=week]").addEventListener("change",clearCorrection);
 $("#refresh-button").addEventListener("click",()=>refreshState().catch(error=>alert(error.message)));
 $("#review-refresh").addEventListener("click",()=>refreshState().catch(error=>alert(error.message)));
-$("#lock-button").addEventListener("click",lock);
 $("#connection-test").addEventListener("click",async()=>{try{$("#settings-status").textContent=(await connectionTest())?"Private connection is working.":"Unexpected repository."}catch(error){$("#settings-status").textContent=error.message}});
 $("#clear-device").addEventListener("click",async()=>{
-  // Name the queued entries: they are sealed with the key this record carries the salt
-  // for, so clearing the token makes them unreadable. Destroying something he typed
-  // without saying so is exactly what this app must never do.
+  // Name the queued entries: they are sealed with the device key, so clearing the
+  // token makes them unreadable. Destroying something he typed without saying so
+  // is exactly what this app must never do.
   const queued = queuedCount ? ` and ${queuedCount} unsent entr${queuedCount === 1 ? "y" : "ies"}` : "";
   if (!confirm(`Remove the encrypted GitHub token${queued} from this device?`)) return;
-  await db("delete");
-  await deviceValue("delete", "block");
-  await outboxClear();
-  await draftsClear();
+  await wipeDeviceStores();
   lock();
   outboxNote = "";
   await renderOutbox();
@@ -1267,11 +1179,6 @@ $("#theme-toggle").addEventListener("click",()=>{const next=document.documentEle
 window.addEventListener("online",()=>{setNetworkState(); drainOutbox().catch(()=>{}); drainDrafts().catch(()=>{});});
 window.addEventListener("offline",setNetworkState);
 $("#outbox-send").addEventListener("click",()=>{drainOutbox().catch(error=>{outboxNote=error.message; renderOutbox();});});
-for (const eventName of ["pointerdown","keydown","touchstart"]) document.addEventListener(eventName,resetLockTimer,{passive:true});
-// A phone put in a pocket mid-session should not leave an unlocked token in memory for
-// the rest of the idle window.
-document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden"&&token)lock(); });
-
 // Installable, and able to open with no signal. Registered only from a top-level
 // window, so a framed page cannot install a worker for this origin.
 try {

@@ -4,7 +4,7 @@
 
 export const FRAME_ERROR = "GYM Ledger refuses to run inside a frame.";
 export const FRAME_ATTRIBUTE = "data-frame-check";
-export const SENSITIVE_SELECTOR = "#setup-form input, #unlock-form input";
+export const SENSITIVE_SELECTOR = "#setup-form input";
 
 export function isFramed(view) {
   try {
@@ -43,7 +43,7 @@ export function clearSensitiveInputs(inputs) {
 export function clearCredentialFields(doc = globalThis.document) {
   if (!doc) return;
   clearSensitiveInputs([...doc.querySelectorAll(SENSITIVE_SELECTOR)]);
-  for (const id of ["setup-form", "unlock-form"]) {
+  for (const id of ["setup-form"]) {
     const form = doc.getElementById(id);
     if (form && typeof form.reset === "function") form.reset();
   }
